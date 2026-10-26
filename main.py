@@ -1,14 +1,33 @@
-"""E-Bike Doctor AI API starter. Deploy behind HTTPS; never ship API keys in the Android APK."""
+"""E-Bike Doctor AI API. Provider keys must remain server-side."""
+import json
+import logging
 import os
+import time
+from collections import defaultdict, deque
+from threading import Lock
 from typing import Literal
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-from openai import OpenAI
+from urllib.error import HTTPError, URLError
+from urllib.request import Request as URLRequest, urlopen
 
-app = FastAPI(title="E-Bike Doctor AI API", version="0.1.0")
-API_KEY = os.getenv("OPENAI_API_KEY", "")
-MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-client = OpenAI(api_key=API_KEY) if API_KEY else None
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("ebike-doctor")
+
+app = FastAPI(title="E-Bike Doctor AI API", version="0.3.0")
+
+# Gemini is preferred. OpenAI remains an optional fallback for existing deployments.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
+
+RATE_LIMIT = int(os.getenv("RATE_LIMIT_PER_10_MINUTES", "10"))
+WINDOW_SECONDS = 600
+_request_times: dict[str, deque[float]] = defaultdict(deque)
+_rate_lock = Lock()
 
 class DiagnosisRequest(BaseModel):
     language: Literal["hu", "en", "de"] = "hu"
@@ -22,16 +41,37 @@ class DiagnosisRequest(BaseModel):
     measurements: str = Field(default="", max_length=3000)
     skill_level: Literal["beginner", "technician"] = "beginner"
 
+@app.middleware("http")
+async def basic_security_headers_and_limits(request: Request, call_next):
+    if request.url.path == "/v1/diagnose" and request.method == "POST":
+        client_ip = request.client.host if request.client else "unknown"
+        now = time.monotonic()
+        with _rate_lock:
+            bucket = _request_times[client_ip]
+            while bucket and now - bucket[0] > WINDOW_SECONDS:
+                bucket.popleft()
+            if len(bucket) >= RATE_LIMIT:
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Rate limit exceeded. Please try again later."},
+                    headers={"Retry-After": str(max(1, int(WINDOW_SECONDS - (now - bucket[0]))))},
+                )
+            bucket.append(now)
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "ai_configured": bool(client)}
+    provider = "gemini" if GEMINI_API_KEY else ("openai" if OPENAI_API_KEY else "none")
+    return {"status": "ok", "ai_configured": provider != "none", "provider": provider}
 
-@app.post("/v1/diagnose")
-def diagnose(req: DiagnosisRequest):
-    if client is None:
-        raise HTTPException(status_code=503, detail="AI service is not configured on the server")
+def make_prompt(req: DiagnosisRequest) -> str:
     lang = {"hu": "Hungarian", "en": "English", "de": "German"}[req.language]
-    prompt = f"""You are the E-Bike Doctor diagnostic assistant for electric bicycles and light electric vehicles. Respond in {lang}.
+    return f"""You are the E-Bike Doctor diagnostic assistant for electric bicycles and light electric vehicles. Respond in {lang}.
 Use careful technician-grade reasoning. Separate confirmed facts, likely causes, and unknowns. Never invent a manufacturer fault-code definition, pinout, wire colour, or voltage specification. If exact model documentation is unavailable, explicitly say so and give only safe generic checks. Ask for missing information when needed. Provide a numbered next-step sequence; for each measurement specify meter mode, safe measurement points, expected range only when well-supported, and interpretation. Warn before live electrical tests. Never recommend bypassing a BMS, defeating brake cutoffs, shorting battery cells, or applying pack voltage to signal/data pins. For swollen, hot, damaged, hissing or smoking batteries, tell the user to stop, isolate safely, and seek qualified service. Do not claim to control or read the bike electronically; this is text-based advice only. Avoid requesting names, addresses, phone numbers or other customer personal data.
 
 System facts:
@@ -46,9 +86,69 @@ Measurements: {req.measurements}
 User skill: {req.skill_level}
 
 Return: (1) brief assessment and confidence, (2) safety warning if relevant, (3) next best test, (4) possible interpretations, (5) information needed to confirm. Do not imply a diagnosis is certain without evidence."""
+
+def call_gemini(prompt: str) -> str:
+    if not GEMINI_API_KEY:
+        raise RuntimeError("Gemini is not configured")
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        + GEMINI_MODEL
+        + ":generateContent"
+    )
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1400},
+    }
+    data = json.dumps(payload).encode("utf-8")
+    request = URLRequest(url, data=data, headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}, method="POST")
     try:
-        response = client.responses.create(model=MODEL, input=prompt)
-        return {"answer": response.output_text, "model": MODEL, "disclaimer": "AI advice can be wrong. Confirm values with the exact manufacturer's service documentation."}
+        with urlopen(request, timeout=45) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        # Do not log the URL: the API key is a query parameter.
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:1200]
+        except Exception:
+            detail = ""
+        logger.error("Gemini HTTP error status=%s response=%s", exc.code, detail)
+        raise RuntimeError(f"Gemini provider returned HTTP {exc.code}") from None
+    except (URLError, TimeoutError) as exc:
+        logger.error("Gemini connection error type=%s", type(exc).__name__)
+        raise RuntimeError("Gemini connection failed or timed out") from None
+    candidates = result.get("candidates") or []
+    if not candidates:
+        logger.error("Gemini response had no candidates; prompt feedback=%s", result.get("promptFeedback"))
+        raise RuntimeError("Gemini returned no response candidates")
+    parts = candidates[0].get("content", {}).get("parts", [])
+    answer = "\n".join(p.get("text", "") for p in parts if p.get("text"))
+    if not answer.strip():
+        raise RuntimeError("Gemini returned empty text")
+    return answer.strip()
+
+def call_openai(prompt: str) -> str:
+    # Optional fallback for deployments which still have an OpenAI API key.
+    from openai import OpenAI
+    client = OpenAI(api_key=OPENAI_API_KEY, timeout=45.0, max_retries=1)
+    response = client.responses.create(model=OPENAI_MODEL, input=prompt)
+    return response.output_text
+
+@app.post("/v1/diagnose")
+def diagnose(req: DiagnosisRequest):
+    if not GEMINI_API_KEY and not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="AI provider is not configured on the server")
+    prompt = make_prompt(req)
+    provider = "gemini" if GEMINI_API_KEY else "openai"
+    try:
+        answer = call_gemini(prompt) if GEMINI_API_KEY else call_openai(prompt)
+        model = GEMINI_MODEL if provider == "gemini" else OPENAI_MODEL
+        return {
+            "answer": answer,
+            "model": model,
+            "provider": provider,
+            "disclaimer": "AI advice can be wrong. Confirm values with the exact manufacturer's service documentation."
+        }
     except Exception as exc:
-        # Do not return provider details or secrets to the client.
-        raise HTTPException(status_code=502, detail="AI provider request failed; retry later") from exc
+        # Keep secrets out of client responses. Provider status/type is available in server logs.
+        logger.error("AI diagnosis failed provider=%s error_type=%s message=%s",
+                     provider, type(exc).__name__, str(exc)[:300])
+        raise HTTPException(status_code=502, detail="AI provider request failed; check server logs and provider quota") from None
