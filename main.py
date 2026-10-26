@@ -152,3 +152,74 @@ def diagnose(req: DiagnosisRequest):
         logger.error("AI diagnosis failed provider=%s error_type=%s message=%s",
                      provider, type(exc).__name__, str(exc)[:300])
         raise HTTPException(status_code=502, detail="AI provider request failed; check server logs and provider quota") from None
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class ChatRequest(BaseModel):
+    language: Literal["hu", "en", "de"] = "hu"
+    messages: list[ChatMessage] = Field(min_length=1, max_length=20)
+
+
+@app.post("/v1/chat")
+def chat(req: ChatRequest):
+    if not GEMINI_API_KEY and not OPENAI_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="AI provider is not configured on the server",
+        )
+
+    lang = {
+        "hu": "Hungarian",
+        "en": "English",
+        "de": "German",
+    }[req.language]
+
+    conversation = "\n".join(
+        ("User" if msg.role == "user" else "Assistant")
+        + ": "
+        + msg.content
+        for msg in req.messages
+    )
+
+    prompt = f"""You are E-Bike Doctor, a careful professional
+electric bicycle and scooter repair assistant.
+Reply in {lang}. Use the conversation history to answer
+follow-up questions. Ask for missing model details when needed.
+Never invent fault-code meanings, pinouts or specifications.
+Never recommend bypassing a BMS or safety cutoffs.
+Warn about dangerous battery conditions.
+
+Conversation:
+{conversation}
+
+Reply to the latest user message with useful, clear steps."""
+
+    try:
+        if GEMINI_API_KEY:
+            answer = call_gemini(prompt)
+            provider = "gemini"
+            model = GEMINI_MODEL
+        else:
+            answer = call_openai(prompt)
+            provider = "openai"
+            model = OPENAI_MODEL
+
+        return {
+            "answer": answer,
+            "provider": provider,
+            "model": model,
+        }
+    except Exception as exc:
+        logger.error(
+            "AI chat failed provider=%s error_type=%s message=%s",
+            "gemini" if GEMINI_API_KEY else "openai",
+            type(exc).__name__,
+            str(exc)[:300],
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="AI chat request failed; check server logs",
+        ) from None
