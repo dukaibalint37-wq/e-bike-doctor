@@ -39,9 +39,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
 BURST_LIMIT = int(os.getenv("RATE_LIMIT_PER_10_MINUTES", "30"))
 WINDOW_SECONDS = 600
-LIMITED_PREFIXES = ("/v1/diagnose", "/v1/vision-diagnose", "/v1/chat", "/v1/smart-diagnose", "/v1/register")
+LIMITED_PREFIXES = ("/v1/diagnose", "/v1/vision-diagnose", "/v1/chat", "/v1/smart-diagnose", "/v1/register", "/v1/report")
 ENDPOINTS = ["/health", "/v1/register", "/v1/quota", "/v1/diagnose", "/v1/diagnose/stream", "/v1/smart-diagnose",
-             "/v1/smart-diagnose/stream", "/v1/vision-diagnose", "/v1/chat", "/v1/chat/stream", "/v1/metrics"]
+             "/v1/smart-diagnose/stream", "/v1/vision-diagnose", "/v1/chat", "/v1/chat/stream", "/v1/metrics", "/v1/report"]
 _request_times: dict[str, deque[float]] = defaultdict(deque)
 _rate_lock = Lock()
 
@@ -131,6 +131,47 @@ def metrics_view(x_admin_token: Optional[str] = Header(default=None)):
     snap["store"] = STORE.kind
     snap["store_errors"] = getattr(STORE, "errors", 0)
     return snap
+
+
+# ----------------------------------------------------------------------------- AI content reports (Google Play AI policy)
+REPORT_TTL = 90 * 86_400
+REPORTS_PER_IP_PER_DAY = 20
+
+
+class ReportRequest(BaseModel):
+    """In-app report of an AI answer (Google Play 'AI-Generated Content' policy). No photo, no user identity is stored."""
+    kind: Literal["chat", "vision", "smart", "diagnose"] = "chat"
+    language: Literal["hu", "en", "de"] = "hu"
+    reason: Literal["offensive", "harmful", "incorrect", "other"]
+    comment: str = Field(default="", max_length=500)
+    excerpt: str = Field(default="", max_length=2000)   # the reported AI answer text only
+
+
+def _admin_ok(token):
+    admin = os.getenv("ADMIN_TOKEN", "").strip()
+    return bool(admin) and token == admin
+
+
+@app.post("/v1/report")
+def report_ai_content(req: ReportRequest, request: Request):
+    day = quota_mod.today()
+    if STORE.incr(f"rep_ip:{day}:{quota_mod.ip_hash(client_ip(request))}", 86_400 + 3600) > REPORTS_PER_IP_PER_DAY:
+        raise HTTPException(status_code=429, detail="Too many reports today", headers={"Retry-After": str(quota_mod.seconds_to_midnight())})
+    n = STORE.incr(f"rep_n:{day}", REPORT_TTL)
+    STORE.set(f"rep:{day}:{n}", {"kind": req.kind, "language": req.language, "reason": req.reason,
+                                 "comment": req.comment.strip()[:500], "excerpt": req.excerpt.strip()[:2000], "t": int(time.time())}, REPORT_TTL)
+    logger.warning("AI content report day=%s n=%s kind=%s reason=%s", day, n, req.kind, req.reason)
+    return {"ok": True, "id": f"{day}-{n}"}
+
+
+@app.get("/v1/reports")
+def reports_view(day: Optional[str] = None, x_admin_token: Optional[str] = Header(default=None)):
+    if not _admin_ok(x_admin_token):
+        raise HTTPException(status_code=404, detail="Not Found")
+    day = day if day and day.isdigit() and len(day) == 8 else quota_mod.today()
+    count = int(STORE.get(f"rep_n:{day}") or 0)
+    items = [STORE.get(f"rep:{day}:{i}") for i in range(max(1, count - 199), count + 1)] if count else []
+    return {"day": day, "count": count, "reports": [x for x in items if x]}
 
 
 # ----------------------------------------------------------------------------- quota helpers

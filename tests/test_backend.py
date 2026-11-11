@@ -311,6 +311,27 @@ class MainLogicTest(unittest.TestCase):
         self.assertEqual(cm.exception.status_code, 502)
         self.assertEqual(m.QUOTA.remaining(None, "5.5.5.5"), 2)
 
+    # ---------------- 2.2.1: in-app AI content reports (Google Play AI-generated content policy)
+    def test_report_stored_and_admin_only(self):
+        m = self.main
+        r = m.report_ai_content(m.ReportRequest(kind="vision", language="de", reason="incorrect", comment="falscher Code", excerpt="CODES: E21"), FakeRequest("4.4.4.1"))
+        self.assertTrue(r["ok"])
+        with self.assertRaises(Exception):
+            m.reports_view(None, None)                       # hidden without admin token
+        v = m.reports_view(None, "adm")
+        self.assertEqual(v["count"], 1)
+        self.assertEqual(v["reports"][0]["reason"], "incorrect"); self.assertEqual(v["reports"][0]["excerpt"], "CODES: E21")
+        self.assertEqual(len(self.log), 0, "reports never call Gemini")
+        self.assertEqual(m.QUOTA.remaining(None, "4.4.4.1"), 2, "reports do not use the AI quota")
+
+    def test_report_rate_limited_per_ip(self):
+        m = self.main
+        for _ in range(m.REPORTS_PER_IP_PER_DAY):
+            m.report_ai_content(m.ReportRequest(reason="other"), FakeRequest("4.4.4.2"))
+        with self.assertRaises(Exception) as cm:
+            m.report_ai_content(m.ReportRequest(reason="other"), FakeRequest("4.4.4.2"))
+        self.assertEqual(cm.exception.status_code, 429)
+
     def test_metrics_protected(self):
         m = self.main
         with self.assertRaises(Exception):

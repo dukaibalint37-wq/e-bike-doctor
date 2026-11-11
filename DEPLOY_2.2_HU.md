@@ -1,6 +1,9 @@
 # Backend 2.2 telepítése Renderre – terv, előfeltételek, visszaállítás
 
-> Állapot (2026-11-11): **előkészítve, NEM telepítve.** Az élő szerverhez senki nem nyúlt.
+> **ÉLESBEN (2026-11-11 22:56):** GitHub `dukaibalint37-wq/e-bike-doctor` @ `main` = `214c65b`,
+> Render deploy `dep-dbqe8f3rjlhs73folob0` (live). Visszaállítási pont: `dep-dbqe7149v7es73cb048g` (commit `3d0ee0d`).
+> Ellenőrzés: verify_deploy.ps1 14/14 OK; kvóta Upstash-ben tartós, 51. kérdés → 429 (szöveg és kép is).
+> Megjegyzés: a repóban a backend a GYÖKÉRBEN van (Root Directory üres), nem `backend/` mappában.
 > Titkos értéket (API-kulcs, QUOTA_SECRET, ADMIN_TOKEN, Upstash token) soha ne írj chatbe – csak a Render
 > „Environment” oldalára.
 

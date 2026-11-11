@@ -28,7 +28,7 @@ Write-Host "E-Bike Doctor backend ellenőrzés: $Base" -ForegroundColor Cyan
 $h = Invoke-Json "GET" "/health" $null @{}
 $hj = $h.Body | ConvertFrom-Json
 Add-Result "health elérhető" ($h.Status -eq 200) "HTTP $($h.Status), $($h.Ms) ms"
-Add-Result "verzió 2.2.0" ($hj.version -eq "2.2.0") "version=$($hj.version)"
+Add-Result "verzió 2.2.x" ($hj.version -like "2.2.*") "version=$($hj.version)"
 Add-Result "AI konfigurálva" ($hj.ai_configured -eq $true) "provider=$($hj.provider)"
 Add-Result "streaming" ($hj.streaming -eq $true) ""
 Add-Result "napi keret = 50" ($hj.daily_limit -eq 50) "daily_limit=$($hj.daily_limit)"
