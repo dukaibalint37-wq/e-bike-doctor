@@ -339,6 +339,21 @@ class EndpointTest(unittest.TestCase):
                 self.assertEqual(cm.exception.status_code, 401)
         finally:
             os.environ.pop("AI_ACCESS_MODE")
+    def test_licence_storage_never_falls_back_to_memory(self):
+        from store import FailSafeStore, MemoryStore
+
+        class Down:
+            kind = "upstash"
+            def get(self, k): raise OSError("down")
+            def set(self, k, v, t): raise OSError("down")
+            def incr(self, k, t, a=1): raise OSError("down")
+        mem = MemoryStore()
+        strict = L.StrictStore(FailSafeStore(Down(), mem))
+        svc = L.LicenseService(strict, self.main.QUOTA.signer)
+        with self.assertRaises(L.LicenseError) as cm:
+            svc.create("EBD-WIN", name="X")
+        self.assertEqual((cm.exception.code, cm.exception.status), ("store_unavailable", 503))
+        self.assertIsNone(mem.get("lic:seq"))          # nothing silently written to memory
     def test_update_manifest_is_served(self):
         r = self.main.app_update("EBD-WIN")
         self.assertIn("signature", r)

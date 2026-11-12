@@ -51,11 +51,22 @@ _request_times: dict[str, deque[float]] = defaultdict(deque)
 _rate_lock = Lock()
 
 STORE = make_store()
-MAILER = mailer_mod.Mailer(STORE)
+# Licences, purchases and mails: strict persistent store (no silent memory fallback), see licensing.StrictStore.
+LIC_STORE = licensing_mod.StrictStore(STORE)
+MAILER = mailer_mod.Mailer(LIC_STORE)
 QUOTA = quota_mod.QuotaManager(STORE)
-LICENSES = licensing_mod.LicenseService(STORE, QUOTA.signer)
-QUOTA.subject_resolver = LICENSES.resolve_ai_subject
-SHOP = shop_mod.Shop(STORE, LICENSES, MAILER)
+LICENSES = licensing_mod.LicenseService(LIC_STORE, QUOTA.signer)
+
+
+def _resolve_ai_subject(iid):
+    try:
+        return LICENSES.resolve_ai_subject(iid)
+    except licensing_mod.LicenseError:
+        return None   # storage outage: deny this AI request (no cost), the licence itself is untouched
+
+
+QUOTA.subject_resolver = _resolve_ai_subject
+SHOP = shop_mod.Shop(LIC_STORE, LICENSES, MAILER)
 CACHE = answer_cache.AnswerCache(STORE)
 METRICS = metrics_mod.Metrics()
 
@@ -603,7 +614,10 @@ def admin_licenses(q: str = "", x_admin_token: Optional[str] = Header(default=No
 @app.post("/v1/admin/licenses")
 def admin_create(req: AdminCreateRequest, x_admin_token: Optional[str] = Header(default=None)):
     _admin(x_admin_token)
-    key, rec = LICENSES.create(req.product, email=req.email, name=req.name, owner=req.owner, test=req.test, source="admin:" + req.note)
+    try:
+        key, rec = LICENSES.create(req.product, email=req.email, name=req.name, owner=req.owner, test=req.test, source="admin:" + req.note)
+    except licensing_mod.LicenseError as exc:
+        raise _lic_error(exc) from None
     return {"license_key": key, "license": licensing_mod.public_view(rec)}
 
 

@@ -44,6 +44,31 @@ class LicenseError(Exception):
         self.code, self.status, self.message = code, status, message
 
 
+class StrictStore:
+    """Licence/shop data must NEVER silently fall back to the in-memory store (FailSafeStore does that for quota/cache):
+    a memory write would be lost on restart, and a memory 'lic:seq' restarting at 1 could overwrite a real licence once
+    the remote store is back. On any storage error the request fails with 503 (clients/webhooks retry)."""
+
+    def __init__(self, store):
+        self.s = getattr(store, "primary", store)
+        self.kind = getattr(self.s, "kind", "?")
+
+    def _c(self, name, *a):
+        try:
+            return getattr(self.s, name)(*a)
+        except Exception:
+            raise LicenseError("store_unavailable", 503, "Licence storage temporarily unavailable - please retry") from None
+
+    def get(self, key):
+        return self._c("get", key)
+
+    def set(self, key, value, ttl):
+        return self._c("set", key, value, ttl)
+
+    def incr(self, key, ttl, amount=1):
+        return self._c("incr", key, ttl, amount)
+
+
 # ----------------------------------------------------------------------------------------------------------- keys
 def _check_char(body):
     return ALPHABET[sum((i + 1) * ALPHABET.index(c) for i, c in enumerate(body)) % 32]
@@ -101,8 +126,14 @@ class LeaseSigner:
     def __init__(self, pem=None):
         from cryptography.hazmat.primitives import serialization
         pem = pem or os.getenv("LEASE_SIGNING_KEY_PEM", "").replace("\\n", "\n").strip()
-        self.available = bool(pem)
-        self._key = serialization.load_pem_private_key(pem.encode(), password=None) if pem else None
+        self._key = None
+        if pem:
+            try:   # a malformed env value must not take the whole API (AI for existing apps) down
+                self._key = serialization.load_pem_private_key(pem.encode(), password=None)
+            except (ValueError, TypeError):
+                import logging
+                logging.getLogger("ebike-doctor.licensing").error("LEASE_SIGNING_KEY_PEM is not a valid PEM private key - licence server disabled")
+        self.available = self._key is not None
 
     def public_spki_b64(self):
         from cryptography.hazmat.primitives import serialization
