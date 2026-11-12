@@ -79,7 +79,14 @@ def install_web_stubs():
     class StreamingResponse:
         def __init__(self, body, media_type=None, headers=None):
             self.body, self.media_type, self.headers = body, media_type, headers or {}
+    class HTMLResponse:
+        def __init__(self, content="", status_code=200, headers=None):
+            self.content, self.status_code, self.headers = content, status_code, headers or {}
+    class RedirectResponse:
+        def __init__(self, url, status_code=307, headers=None):
+            self.url, self.status_code, self.headers = url, status_code, headers or {}
     responses.JSONResponse, responses.StreamingResponse = JSONResponse, StreamingResponse
+    responses.HTMLResponse, responses.RedirectResponse = HTMLResponse, RedirectResponse
     pydantic = types.ModuleType("pydantic")
     class BaseModel:
         def __init__(self, **kw):
@@ -97,6 +104,10 @@ def install_web_stubs():
 
 
 class FakeRequest:
-    def __init__(self, ip="203.0.113.5"):
-        self.headers = {"x-forwarded-for": ip}
+    def __init__(self, ip="203.0.113.5", body=b"", headers=None):
+        self.headers = {"x-forwarded-for": ip, **(headers or {})}
         self.client = None
+        self._body = body
+
+    async def body(self):
+        return self._body

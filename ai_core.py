@@ -8,10 +8,10 @@ import os
 
 logger = logging.getLogger("ebike-doctor")
 
-BACKEND_VERSION = "2.2.1"
+BACKEND_VERSION = "3.0.0"
 LANG_NAMES = {"hu": "Hungarian", "en": "English", "de": "German"}
 
-# Compact rules (fewer input tokens on every call) – content unchanged in substance.
+# Compact rules (fewer input tokens on every call) â€“ content unchanged in substance.
 SAFETY_RULES = (
     "Rules: never invent fault-code meanings, pinouts, wire colours, voltages or manufacturer procedures; if model "
     "documentation is unknown say so and give only safe generic checks. Never advise bypassing a BMS or brake cut-off, "

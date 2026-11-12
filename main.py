@@ -20,7 +20,7 @@ from threading import Lock
 from typing import Literal, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 import ai_core
@@ -28,6 +28,9 @@ import cache as answer_cache
 import gemini_client
 import metrics as metrics_mod
 import quota as quota_mod
+import licensing as licensing_mod
+import mailer as mailer_mod
+import shop as shop_mod
 from store import make_store
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -39,14 +42,20 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
 BURST_LIMIT = int(os.getenv("RATE_LIMIT_PER_10_MINUTES", "30"))
 WINDOW_SECONDS = 600
-LIMITED_PREFIXES = ("/v1/diagnose", "/v1/vision-diagnose", "/v1/chat", "/v1/smart-diagnose", "/v1/register", "/v1/report")
+LIMITED_PREFIXES = ("/v1/diagnose", "/v1/vision-diagnose", "/v1/chat", "/v1/smart-diagnose", "/v1/register", "/v1/report", "/v1/license", "/v1/shop")
 ENDPOINTS = ["/health", "/v1/register", "/v1/quota", "/v1/diagnose", "/v1/diagnose/stream", "/v1/smart-diagnose",
-             "/v1/smart-diagnose/stream", "/v1/vision-diagnose", "/v1/chat", "/v1/chat/stream", "/v1/metrics", "/v1/report"]
+             "/v1/smart-diagnose/stream", "/v1/vision-diagnose", "/v1/chat", "/v1/chat/stream", "/v1/metrics", "/v1/report",
+             "/v1/license/activate", "/v1/license/refresh", "/v1/license/deactivate", "/v1/shop/lemonsqueezy/webhook", "/v1/shop/download",
+             "/v1/shop/download-link", "/v1/app/update"]
 _request_times: dict[str, deque[float]] = defaultdict(deque)
 _rate_lock = Lock()
 
 STORE = make_store()
+MAILER = mailer_mod.Mailer(STORE)
 QUOTA = quota_mod.QuotaManager(STORE)
+LICENSES = licensing_mod.LicenseService(STORE, QUOTA.signer)
+QUOTA.subject_resolver = LICENSES.resolve_ai_subject
+SHOP = shop_mod.Shop(STORE, LICENSES, MAILER)
 CACHE = answer_cache.AnswerCache(STORE)
 METRICS = metrics_mod.Metrics()
 
@@ -98,7 +107,9 @@ def health():
     provider = provider_name()
     return {"status": "ok", "ai_configured": provider != "none", "provider": provider, "version": ai_core.BACKEND_VERSION,
             "models": {"fast": gemini_client.models_for("fast"), "quality": gemini_client.models_for("quality")} if provider == "gemini" else [OPENAI_MODEL],
-            "daily_limit": QUOTA.daily_limit, "store": STORE.kind, "streaming": True, "endpoints": ENDPOINTS}
+            "daily_limit": QUOTA.daily_limit, "store": STORE.kind, "streaming": True, "endpoints": ENDPOINTS,
+            # 3.0: the commercial apps use AI only when the operator switched it on (AI_PUBLIC=1 after billing approval)
+            "ai_public": os.getenv("AI_PUBLIC", "0").strip() == "1", "license_server": LICENSES.lease.available}
 
 
 class RegisterRequest(BaseModel):
@@ -179,18 +190,29 @@ QUOTA_MESSAGES = {
     "daily_quota": "Daily AI question limit reached",
     "ip_limit": "Daily AI limit for this network reached",
     "global_limit": "AI service daily capacity reached",
-    "cost_limit": "AI service daily budget reached",
+    "cost_limit": "AI service budget reached",
+    "license_invalid": "Licence not active on this device",
+    "license_required": "An activated licence is required for AI",
+    "token_required": "App registration required for AI",
 }
 
 
 def consume_quota(token, ip):
     d = QUOTA.check_and_consume(token, ip)
     if not d.allowed:
-        status = 503 if d.reason in ("global_limit", "cost_limit") else 429
+        status = 503 if d.reason in ("global_limit", "cost_limit") else 401 if d.reason in ("license_invalid", "license_required", "token_required") else 429
         raise HTTPException(status_code=status, detail=QUOTA_MESSAGES.get(d.reason, "Limit reached"),
                             headers={"Retry-After": str(d.retry_after), "X-Quota-Reason": d.reason, "X-Quota-Remaining": "0",
                                      "X-Quota-Limit": str(d.limit)})
     return d
+
+
+def access_gate(token, request):
+    """Licence / token gate BEFORE the answer cache: in token/license mode a cached answer must not reach an unlicensed client.
+    Does not consume quota (consume_quota does that once the request really goes to the provider)."""
+    _subject, reason = QUOTA.subject_for(token, client_ip(request))
+    if reason:
+        raise HTTPException(status_code=401, detail=QUOTA_MESSAGES.get(reason, "Not allowed"), headers={"X-Quota-Reason": reason})
 
 
 def quota_headers(d):
@@ -202,6 +224,10 @@ def provider_http_error(exc):
         return HTTPException(status_code=429, detail="AI provider quota reached; try again later", headers={"Retry-After": "60", "X-Quota-Reason": "provider"})
     if exc.status == 503:
         return HTTPException(status_code=503, detail="AI provider is not configured on the server")
+    if exc.status in (402, 403):
+        # prepaid balance used up / billing disabled at the provider -> polite, non-technical message in the apps
+        logger.error("AI provider billing problem status=%s", exc.status)
+        return HTTPException(status_code=503, detail="AI service temporarily unavailable (provider balance)", headers={"X-Quota-Reason": "provider_billing", "Retry-After": "3600"})
     return HTTPException(status_code=502, detail="AI provider request failed; check server logs and provider quota")
 
 
@@ -215,6 +241,7 @@ def _call_openai(prompt: str) -> str:
 def run_text(endpoint, request, token, prompt_parts, tier, max_tokens, cache_key=None):
     """Non-streaming execution with cache + quota + metrics. Returns JSONResponse (2.0-compatible body)."""
     t0 = time.monotonic()
+    access_gate(token, request)
     provider = provider_name()
     if provider == "none":
         METRICS.record(endpoint, False)
@@ -244,7 +271,7 @@ def run_text(endpoint, request, token, prompt_parts, tier, max_tokens, cache_key
         METRICS.record(endpoint, False, server_ms=(time.monotonic() - t0) * 1000)
         logger.error("AI request failed endpoint=%s error_type=%s", endpoint, type(exc).__name__)
         raise HTTPException(status_code=502, detail="AI provider request failed; check server logs") from None
-    QUOTA.add_cost(metrics_mod.estimate_cost_usd(r["usage"]))
+    QUOTA.add_cost(metrics_mod.estimate_cost_usd(r["usage"]), _tokens(r["usage"]))
     METRICS.record(endpoint, True, server_ms=(time.monotonic() - t0) * 1000, gemini_ttfb_ms=r["ttfb_ms"], total_ms=r["total_ms"],
                    usage=r["usage"], model=r["model"])
     if cache_key:
@@ -261,6 +288,7 @@ def sse(event, data):
 def run_stream(endpoint, request, token, prompt_parts, tier, max_tokens, cache_key=None):
     """SSE streaming. Errors before the first token become normal HTTP errors (quota refunded)."""
     t0 = time.monotonic()
+    access_gate(token, request)
     if not ai_core.gemini_key():
         METRICS.record(endpoint, False)
         raise HTTPException(status_code=503, detail="Streaming requires GEMINI_API_KEY on the server")
@@ -301,7 +329,7 @@ def run_stream(endpoint, request, token, prompt_parts, tier, max_tokens, cache_k
                     yield sse("delta", {"t": payload})
                 elif ev == "done":
                     ok = True
-                    QUOTA.add_cost(metrics_mod.estimate_cost_usd(payload.get("usage")))
+                    QUOTA.add_cost(metrics_mod.estimate_cost_usd(payload.get("usage")), _tokens(payload.get("usage")))
                     METRICS.record(endpoint, True, server_ms=(time.monotonic() - t0) * 1000, gemini_ttfb_ms=ttfb,
                                    total_ms=payload.get("total_ms"), usage=payload.get("usage"), model=payload.get("model", ""))
                     if cache_key:
@@ -437,3 +465,169 @@ def chat(req: ChatRequest, request: Request, x_ebd_token: Optional[str] = Header
 @app.post("/v1/chat/stream")
 def chat_stream(req: ChatRequest, request: Request, x_ebd_token: Optional[str] = Header(default=None)):
     return run_stream("chat_stream", request, x_ebd_token, chat_parts(req), "fast", 800, chat_cache_key(req))
+
+
+# ============================================================================= 3.0 commercial: licences, shop, updates, admin
+def _tokens(usage):
+    try:
+        return int((usage or {}).get("totalTokenCount") or (usage or {}).get("total_tokens") or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
+def _cost_warning(period, level, spent, cap):
+    logger.warning("COST WARNING %s reached %s%% (%.4f / %.2f USD)", period, level, spent, cap)
+    to = os.getenv("ADMIN_ALERT_EMAIL", "").strip()
+    MAILER.send(to, f"E-Bike Doctor AI cost warning {level}% ({period})",
+                f"AI spend {spent:.4f} USD of cap {cap:.2f} USD ({period}). At 100% the server stops new AI requests until the period resets.", kind="cost")
+
+
+QUOTA.on_cost_warning = _cost_warning
+
+
+def _lic_error(exc):
+    return HTTPException(status_code=exc.status, detail=exc.message, headers={"X-License-Error": exc.code})
+
+
+class LicenseActivateRequest(BaseModel):
+    license_key: str = Field(min_length=10, max_length=60)
+    product: Literal["EBD-WIN", "EBD-AND"]
+    device_id: str = Field(min_length=64, max_length=64)        # salted SHA-256 computed on the device
+    device_name: str = Field(default="", max_length=80)
+    app_version: str = Field(default="", max_length=20)
+    transfer: bool = False
+
+
+class LicenseKeyRequest(BaseModel):
+    license_key: str = Field(min_length=10, max_length=60)
+    product: Literal["EBD-WIN", "EBD-AND"] = "EBD-WIN"
+    device_id: str = Field(default="", max_length=64)
+    app_version: str = Field(default="", max_length=20)
+
+
+@app.post("/v1/license/activate")
+def license_activate(req: LicenseActivateRequest):
+    try:
+        return LICENSES.activate(req.license_key, req.product, req.device_id, req.device_name, req.app_version, req.transfer)
+    except licensing_mod.LicenseError as exc:
+        raise _lic_error(exc) from None
+
+
+@app.post("/v1/license/refresh")
+def license_refresh(req: LicenseKeyRequest):
+    try:
+        return LICENSES.refresh(req.license_key, req.product, req.device_id, req.app_version)
+    except licensing_mod.LicenseError as exc:
+        raise _lic_error(exc) from None
+
+
+@app.post("/v1/license/deactivate")
+def license_deactivate(req: LicenseKeyRequest):
+    try:
+        return LICENSES.deactivate(req.license_key, req.device_id)
+    except licensing_mod.LicenseError as exc:
+        raise _lic_error(exc) from None
+
+
+@app.post("/v1/shop/lemonsqueezy/webhook")
+async def lemonsqueezy_webhook(request: Request):
+    raw = await request.body()
+    try:
+        return SHOP.handle_webhook(raw, request.headers.get("x-signature", ""))
+    except licensing_mod.LicenseError as exc:
+        raise _lic_error(exc) from None
+
+
+@app.get("/v1/shop/download")
+def shop_download(t: str = ""):
+    try:
+        url = SHOP.resolve_download(t)
+    except licensing_mod.LicenseError as exc:
+        raise _lic_error(exc) from None
+    return RedirectResponse(url, status_code=302)
+
+
+@app.post("/v1/shop/download-link")
+def shop_download_link(req: LicenseKeyRequest):
+    try:
+        return {"url": SHOP.new_download_link_for_key(req.license_key)}
+    except licensing_mod.LicenseError as exc:
+        raise _lic_error(exc) from None
+
+
+UPDATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "updates")
+
+
+@app.get("/v1/app/update")
+def app_update(product: str = "EBD-WIN"):
+    """Signed update manifest (signature made offline with the update-signing key; the server only serves the file)."""
+    name = {"EBD-WIN": "windows.json", "EBD-AND": "android-web.json"}.get(product)
+    path = os.path.join(UPDATE_DIR, name) if name else ""
+    if not name or not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="No update channel")
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+# ---------------------------------------------------------------------------- admin (X-Admin-Token)
+def _admin(token):
+    if not _admin_ok(token):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+class AdminCreateRequest(BaseModel):
+    product: Literal["EBD-WIN", "EBD-AND"]
+    email: str = Field(default="", max_length=200)
+    name: str = Field(default="", max_length=120)
+    owner: bool = False
+    test: bool = False
+    note: str = Field(default="", max_length=120)
+
+
+class AdminActionRequest(BaseModel):
+    reason: str = Field(default="admin", max_length=120)
+
+
+@app.get("/admin")
+def admin_page():
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin.html"), encoding="utf-8") as f:
+        return HTMLResponse(f.read(), headers={"Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'"})
+
+
+@app.get("/v1/admin/licenses")
+def admin_licenses(q: str = "", x_admin_token: Optional[str] = Header(default=None)):
+    _admin(x_admin_token)
+    return {"licenses": [licensing_mod.public_view(r) for r in LICENSES.search(q)]}
+
+
+@app.post("/v1/admin/licenses")
+def admin_create(req: AdminCreateRequest, x_admin_token: Optional[str] = Header(default=None)):
+    _admin(x_admin_token)
+    key, rec = LICENSES.create(req.product, email=req.email, name=req.name, owner=req.owner, test=req.test, source="admin:" + req.note)
+    return {"license_key": key, "license": licensing_mod.public_view(rec)}
+
+
+@app.post("/v1/admin/licenses/{lid}/{action}")
+def admin_action(lid: str, action: str, req: AdminActionRequest, x_admin_token: Optional[str] = Header(default=None)):
+    _admin(x_admin_token)
+    try:
+        if action == "revoke":
+            return {"license": licensing_mod.public_view(LICENSES.revoke(lid, req.reason))}
+        if action == "reinstate":
+            return {"license": licensing_mod.public_view(LICENSES.reinstate(lid))}
+        if action == "reset-device":
+            return {"license": licensing_mod.public_view(LICENSES.reset_device(lid))}
+        if action == "reissue-key":
+            key, rec = LICENSES.reissue_key(lid)
+            return {"license_key": key, "license": licensing_mod.public_view(rec)}
+    except licensing_mod.LicenseError as exc:
+        raise _lic_error(exc) from None
+    raise HTTPException(status_code=404, detail="Unknown action")
+
+
+@app.get("/v1/admin/stats")
+def admin_stats(x_admin_token: Optional[str] = Header(default=None)):
+    _admin(x_admin_token)
+    return {"licenses": LICENSES.stats(), "shop": SHOP.stats(), "ai_usage": QUOTA.usage(), "ai_access_mode": QUOTA.access_mode(),
+            "lease_signing_configured": LICENSES.lease.available, "mail_configured": MAILER.configured,
+            "outbox": STORE.get("mail:outbox") or [], "version": ai_core.BACKEND_VERSION}

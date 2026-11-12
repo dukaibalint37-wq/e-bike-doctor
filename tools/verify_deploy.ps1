@@ -1,4 +1,4 @@
-﻿# E-Bike Doctor backend 2.2 – post-deployment verification (Windows PowerShell 5.1, no Python needed).
+﻿# E-Bike Doctor backend 3.0 – post-deployment verification (Windows PowerShell 5.1, no Python needed).
 # Usage:  powershell -ExecutionPolicy Bypass -File backend\tools\verify_deploy.ps1 [-Base https://e-bike-doctor.onrender.com]
 # Optional: set $env:EBD_ADMIN_TOKEN beforehand to also read /v1/metrics. Secrets/tokens are NEVER printed.
 # Cost: uses a throw-away test install ID and about 3 AI requests (1 stream chat, 1 chat, 1 photo analysis).
@@ -28,7 +28,7 @@ Write-Host "E-Bike Doctor backend ellenőrzés: $Base" -ForegroundColor Cyan
 $h = Invoke-Json "GET" "/health" $null @{}
 $hj = $h.Body | ConvertFrom-Json
 Add-Result "health elérhető" ($h.Status -eq 200) "HTTP $($h.Status), $($h.Ms) ms"
-Add-Result "verzió 2.2.x" ($hj.version -like "2.2.*") "version=$($hj.version)"
+Add-Result "verzió 3.x" ($hj.version -like "3.*") "version=$($hj.version)"
 Add-Result "AI konfigurálva" ($hj.ai_configured -eq $true) "provider=$($hj.provider)"
 Add-Result "streaming" ($hj.streaming -eq $true) ""
 Add-Result "napi keret = 50" ($hj.daily_limit -eq 50) "daily_limit=$($hj.daily_limit)"
@@ -37,6 +37,9 @@ Add-Result "tartós számláló (Upstash)" $storeOk "store=$($hj.store) – mem�
 Add-Result "képelemző végpont" (@($hj.endpoints) -contains "/v1/vision-diagnose") ""
 $models = if ($hj.models) { ($hj.models | ConvertTo-Json -Compress) } else { "?" }
 Add-Result "modellek" $null $models
+Add-Result "licencszerver konfigurálva" ($hj.license_server -eq $true) "license_server=$($hj.license_server) – LEASE_SIGNING_KEY_PEM szükséges"
+Add-Result "AI nyilvános (ai_public)" $null "ai_public=$($hj.ai_public) – csak számlázási igazolás + jóváhagyás után legyen true"
+Add-Result "licenc-végpontok" (@($hj.endpoints) -contains "/v1/license/activate") ""
 
 # 2. register + quota (token never printed)
 $iid = "verify-" + [guid]::NewGuid().ToString("N").Substring(0, 20)

@@ -1,0 +1,208 @@
+"""Own-website shop integration (Lemon Squeezy as Merchant of Record) – SHOP_MODE=test by default.
+
+Webhook: POST /v1/shop/lemonsqueezy/webhook
+- Signature: X-Signature = hex(HMAC-SHA256(raw body, LEMONSQUEEZY_WEBHOOK_SECRET)) – constant-time compare; unsigned/forged → 401.
+- Events: order_created (paid) → licence + download entitlement + e-mail; order_refunded → licence revoked.
+- Idempotent: each (event, order) is processed once (Lemon Squeezy retries webhooks).
+- SHOP_MODE=test: only test_mode webhooks are processed (licences flagged test=True); live orders are ignored and logged.
+  SHOP_MODE=live is set only after explicit approval.
+Product mapping: LS_PRODUCT_MAP='{"<variant or product id>":"EBD-WIN", "<id>":"EBD-AND"}'.
+Downloads: short-lived HMAC-signed tokens bound to an ACTIVE licence → 302 to DOWNLOAD_URL_EBD_WIN / DOWNLOAD_URL_EBD_AND.
+"""
+import base64
+import hashlib
+import hmac
+import json
+import logging
+import os
+import time
+
+from licensing import PRODUCTS, LicenseError
+
+logger = logging.getLogger("ebike-doctor.shop")
+PRICES = {"EBD-WIN": ("19.99", "EUR"), "EBD-AND": ("5990", "HUF")}
+
+
+def verify_signature(raw: bytes, signature: str, secret: str) -> bool:
+    if not secret or not signature or not raw:
+        return False
+    expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature.strip().lower())
+
+
+def product_map():
+    try:
+        m = json.loads(os.getenv("LS_PRODUCT_MAP", "{}") or "{}")
+        return {str(k): v for k, v in m.items() if v in PRODUCTS}
+    except ValueError:
+        return {}
+
+
+class Shop:
+    def __init__(self, store, licenses, mailer, clock=time.time):
+        self.store, self.licenses, self.mailer, self.clock = store, licenses, mailer, clock
+
+    @property
+    def mode(self):
+        return "live" if os.getenv("SHOP_MODE", "test").strip().lower() == "live" else "test"
+
+    def _secret(self):
+        return os.getenv("DOWNLOAD_SECRET", "").strip() or os.getenv("QUOTA_SECRET", "").strip()
+
+    # ------------------------------------------------------------------ webhook
+    def handle_webhook(self, raw: bytes, signature: str):
+        if not verify_signature(raw, signature, os.getenv("LEMONSQUEEZY_WEBHOOK_SECRET", "").strip()):
+            self.store.incr("shop:rejected_sig", 400 * 86_400)
+            raise LicenseError("bad_signature", 401, "Invalid webhook signature")
+        try:
+            ev = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            raise LicenseError("bad_payload", 400, "Invalid JSON") from None
+        meta, data = ev.get("meta") or {}, ev.get("data") or {}
+        name, test_mode = meta.get("event_name", ""), bool(meta.get("test_mode"))
+        order_id = str(data.get("id", ""))
+        if data.get("type") != "orders" or not order_id:
+            return {"ok": True, "ignored": "not an order event"}
+        if self.mode == "test" and not test_mode:
+            logger.warning("LIVE order webhook ignored because SHOP_MODE=test order=%s", order_id)
+            return {"ok": True, "ignored": "live order while SHOP_MODE=test"}
+        done_key = f"shop:evt:{name}:{order_id}"
+        if self.store.get(done_key):
+            return {"ok": True, "duplicate": True}
+        attrs = data.get("attributes") or {}
+        if name == "order_created":
+            result = self._order_created(order_id, attrs, test_mode)
+        elif name == "order_refunded":
+            result = self._order_refunded(order_id, attrs)
+        else:
+            result = {"ok": True, "ignored": name}
+        self.store.set(done_key, int(self.clock()), 400 * 86_400)
+        return result
+
+    def _products_of(self, attrs):
+        item = attrs.get("first_order_item") or {}
+        m = product_map()
+        p = m.get(str(item.get("variant_id", ""))) or m.get(str(item.get("product_id", "")))
+        return [p] if p else []
+
+    def _order_created(self, order_id, attrs, test_mode):
+        if attrs.get("status") != "paid":
+            return {"ok": True, "ignored": "status " + str(attrs.get("status"))}
+        products = self._products_of(attrs)
+        if not products:
+            logger.error("order %s: unknown product/variant – check LS_PRODUCT_MAP", order_id)
+            return {"ok": True, "ignored": "unknown product"}
+        email, name = attrs.get("user_email", ""), attrs.get("user_name", "")
+        issued = []
+        for prod in products:
+            key, rec = self.licenses.create(prod, email=email, name=name, test=test_mode, source="lemonsqueezy", order_id=order_id)
+            if key is None:          # already issued for this order (retry)
+                continue
+            month = time.strftime("%Y%m", time.gmtime(self.clock()))
+            self.store.incr(f"shop:sales:{month}:{prod}:{'test' if test_mode else 'live'}", 800 * 86_400)
+            self.store.incr(f"shop:revenue_cents:{month}:{attrs.get('currency', 'EUR')}:{'test' if test_mode else 'live'}", 800 * 86_400, int(attrs.get("total", 0) or 0))
+            link = self.download_link(rec["lid"], prod)
+            self.mailer.send(email, purchase_subject(prod), purchase_body(prod, name, key, link, test_mode), kind="purchase")
+            issued.append(rec["lid"])
+        return {"ok": True, "licences": issued}
+
+    def _order_refunded(self, order_id, attrs):
+        revoked = []
+        for prod in PRODUCTS:
+            lid = self.store.get(f"lic:order:{order_id}:{prod}")
+            if lid:
+                self.licenses.revoke(lid, reason="refund " + order_id)
+                revoked.append(lid)
+        month = time.strftime("%Y%m", time.gmtime(self.clock()))
+        self.store.incr(f"shop:refunds:{month}", 800 * 86_400)
+        return {"ok": True, "revoked": revoked}
+
+    # ------------------------------------------------------------------ downloads
+    def download_token(self, lid, product, ttl=48 * 3600):
+        exp = int(self.clock()) + ttl
+        payload = f"{lid}.{product}.{exp}"
+        sig = hmac.new(self._secret().encode(), payload.encode(), hashlib.sha256).digest()[:20]
+        return base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=") + "." + base64.urlsafe_b64encode(sig).decode().rstrip("=")
+
+    def download_link(self, lid, product):
+        base = os.getenv("PUBLIC_BASE_URL", "https://e-bike-doctor.onrender.com").rstrip("/")
+        return f"{base}/v1/shop/download?t={self.download_token(lid, product)}"
+
+    def resolve_download(self, token):
+        """Returns the redirect URL for a valid token of an ACTIVE licence; raises otherwise."""
+        try:
+            body, sig = token.split(".", 1)
+            payload = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)).decode()
+            lid, product, exp = payload.split(".")
+            expected = base64.urlsafe_b64encode(hmac.new(self._secret().encode(), payload.encode(), hashlib.sha256).digest()[:20]).decode().rstrip("=")
+        except (ValueError, UnicodeDecodeError):
+            raise LicenseError("bad_token", 403, "Invalid download link") from None
+        if not self._secret() or not hmac.compare_digest(expected, sig):
+            raise LicenseError("bad_token", 403, "Invalid download link")
+        if int(exp) < self.clock():
+            raise LicenseError("expired", 403, "Download link expired – request a new one with your licence key")
+        rec = self.licenses.get(lid)
+        if rec["status"] != "active" or rec["product"] != product:
+            raise LicenseError("revoked", 403, "Licence is not active")
+        url = os.getenv("DOWNLOAD_URL_" + product.replace("-", "_"), "").strip()
+        if not url:
+            raise LicenseError("not_configured", 503, "Download location not configured")
+        self.store.incr(f"shop:downloads:{product}", 800 * 86_400)
+        return url
+
+    def new_download_link_for_key(self, key):
+        rec = self.licenses.find_by_key(key)
+        if rec["status"] != "active":
+            raise LicenseError("revoked", 403, "Licence is not active")
+        return self.download_link(rec["lid"], rec["product"])
+
+    # ------------------------------------------------------------------ stats
+    def stats(self, months=12):
+        out = []
+        t = time.gmtime(self.clock())
+        y, m = t.tm_year, t.tm_mon
+        for _ in range(months):
+            key = f"{y}{m:02d}"
+            row = {"month": key}
+            for p in PRODUCTS:
+                for mode in ("live", "test"):
+                    row[f"{p}:{mode}"] = int(self.store.get(f"shop:sales:{key}:{p}:{mode}") or 0)
+            row["refunds"] = int(self.store.get(f"shop:refunds:{key}") or 0)
+            for cur in ("EUR", "HUF", "USD"):
+                v = int(self.store.get(f"shop:revenue_cents:{key}:{cur}:live") or 0)
+                if v:
+                    row["revenue_" + cur] = v / 100
+            out.append(row)
+            m -= 1
+            if m == 0:
+                y, m = y - 1, 12
+        return {"mode": self.mode, "months": out, "rejected_signatures": int(self.store.get("shop:rejected_sig") or 0),
+                "downloads": {p: int(self.store.get(f"shop:downloads:{p}") or 0) for p in PRODUCTS}}
+
+
+def purchase_subject(product):
+    return f"{PRODUCTS[product]['name']} – licenckulcs / Lizenzschlüssel / licence key"
+
+
+def purchase_body(product, name, key, link, test_mode):
+    price, cur = PRICES[product]
+    t = "[TESZT / TEST] " if test_mode else ""
+    return f"""{t}{PRODUCTS[product]['name']}
+
+HU – Köszönjük a vásárlást{(', ' + name) if name else ''}!
+Licenckulcs: {key}
+Letöltés (48 óráig érvényes link): {link}
+Aktiválás: a programban Licenc → Aktiválás. Egy licenc egyszerre egy készüléken aktív; készülékcsere a programból.
+
+DE – Vielen Dank für Ihren Kauf!
+Lizenzschlüssel: {key}
+Download (Link 48 Stunden gültig): {link}
+Aktivierung im Programm unter Lizenz → Aktivieren. Eine Lizenz ist gleichzeitig auf einem Gerät aktiv.
+
+EN – Thank you for your purchase!
+Licence key: {key}
+Download (link valid for 48 hours): {link}
+Activate in the app under Licence → Activate. One licence is active on one device at a time.
+
+Ár / Preis / Price: {price} {cur} (egyszeri / einmalig / one-time). Számla és visszatérítés: Lemon Squeezy.
+"""

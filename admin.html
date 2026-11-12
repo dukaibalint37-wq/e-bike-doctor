@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>E-Bike Doctor – Licenckezelő</title>
+<style>
+  :root { --bg:#060a12; --panel:#0d1524; --panel2:#121d31; --ink:#eaf2ff; --muted:#93a4bd; --teal:#1fe0c8; --blue:#2f7bff; --line:#22314a; --red:#ff6b6b; --amber:#ffc66d; --green:#5be3a0; }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.5 "Segoe UI",system-ui,sans-serif; }
+  main { max-width:1200px; margin:0 auto; padding:20px 16px 60px; }
+  h1 { font-size:22px; margin:4px 0 2px; } h2 { font-size:15px; color:var(--teal); margin:0 0 10px; }
+  .muted { color:var(--muted); font-size:12px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px; margin:14px 0; }
+  input, select, button { font:inherit; color:var(--ink); background:var(--panel2); border:1px solid #2e4466; border-radius:9px; padding:7px 10px; }
+  button { cursor:pointer; font-weight:600; } button.primary { background:linear-gradient(135deg,var(--blue),var(--teal)); color:#04121f; border:0; }
+  button.danger { color:var(--red); } .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  table { width:100%; border-collapse:collapse; font-size:13px; } th, td { border-bottom:1px solid var(--line); padding:6px; text-align:left; vertical-align:top; }
+  th { color:var(--muted); font-weight:600; } .pill { border-radius:8px; padding:1px 7px; font-size:12px; background:#172540; }
+  .ok { color:var(--green); } .bad { color:var(--red); } .warn { color:var(--amber); }
+  .key { font-family:Consolas,monospace; font-size:15px; color:var(--teal); background:#0f2e3f; padding:8px 10px; border-radius:8px; display:inline-block; margin-top:8px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:10px; } .stat { background:var(--panel2); border-radius:10px; padding:10px; }
+  .stat b { font-size:20px; display:block; } pre { white-space:pre-wrap; font-size:12px; color:var(--muted); margin:0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>E-Bike Doctor PRO – licenckezelő</h1>
+  <div class="muted">Csak adminisztrátornak. A token csak ebben a böngészőfülben tárolódik (sessionStorage), a licenckulcsokat a szerver nem tárolja olvasható formában.</div>
+
+  <section>
+    <div class="row"><input id="tok" type="password" placeholder="ADMIN_TOKEN" style="min-width:320px" autocomplete="off">
+      <button class="primary" onclick="login()">Belépés</button><span id="msg" class="muted"></span></div>
+  </section>
+
+  <section id="statsBox" hidden><h2>Összesítés</h2><div id="stats" class="grid"></div><pre id="cost" style="margin-top:10px"></pre></section>
+
+  <section id="createBox" hidden>
+    <h2>Új licenc (pl. tulajdonosi, ajándék, kézi eladás)</h2>
+    <div class="row">
+      <select id="cProd"><option value="EBD-WIN">Windows (EBD-WIN)</option><option value="EBD-AND">Android web (EBD-AND)</option></select>
+      <input id="cName" placeholder="Név / cég"><input id="cEmail" placeholder="E-mail (nem kötelező)">
+      <label><input id="cOwner" type="checkbox"> tulajdonosi</label><label><input id="cTest" type="checkbox"> teszt</label>
+      <button class="primary" onclick="createLic()">Létrehozás</button>
+    </div>
+    <div id="newKey"></div>
+  </section>
+
+  <section id="listBox" hidden>
+    <h2>Licencek</h2>
+    <div class="row"><input id="q" placeholder="Keresés: L000123, név, e-mail, rendelés, kulcs" style="min-width:340px" onkeydown="if(event.key==='Enter')load()"><button onclick="load()">Keresés</button></div>
+    <table><thead><tr><th>ID</th><th>Termék</th><th>Állapot</th><th>Vevő</th><th>Eszköz</th><th>Forrás</th><th>Műveletek</th></tr></thead><tbody id="rows"></tbody></table>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let token = sessionStorage.getItem("ebdAdmin") || "";
+function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+async function api(path, body){
+  const r = await fetch(path, { method: body ? "POST" : "GET", headers: Object.assign({"X-Admin-Token": token}, body ? {"Content-Type":"application/json"} : {}), body: body ? JSON.stringify(body) : undefined });
+  if (!r.ok) throw new Error(r.status === 404 ? "Hibás token vagy nincs ilyen elem" : (await r.text()).slice(0, 200));
+  return r.json();
+}
+async function login(){ token = $("tok").value.trim(); sessionStorage.setItem("ebdAdmin", token); await refresh(); }
+async function refresh(){
+  try {
+    const s = await api("/v1/admin/stats");
+    $("msg").textContent = "✓ belépve · backend " + s.version + " · AI-hozzáférés: " + s.ai_access_mode + " · shop: " + s.shop.mode + (s.lease_signing_configured ? "" : " · ⚠ LEASE_SIGNING_KEY_PEM hiányzik");
+    let h = "";
+    for (const [p, v] of Object.entries(s.licenses)) h += `<div class="stat"><span class="muted">${esc(p)}</span><b>${v.active} aktív</b><span class="muted">${v.total} összes · ${v.revoked} visszavont · ${v.activated_devices} aktivált eszköz · ${v.owner} tulajdonosi · ${v.test} teszt</span></div>`;
+    const m = s.shop.months[0] || {};
+    h += `<div class="stat"><span class="muted">Eladás ${esc(m.month || "")}</span><b>${(m["EBD-WIN:live"]||0)} W · ${(m["EBD-AND:live"]||0)} A</b><span class="muted">teszt: ${(m["EBD-WIN:test"]||0)} / ${(m["EBD-AND:test"]||0)} · visszatérítés: ${m.refunds||0}</span></div>`;
+    h += `<div class="stat"><span class="muted">AI költség ${esc(s.ai_usage.month)}</span><b>${s.ai_usage.month_cost_usd} USD</b><span class="muted">plafon: napi ${s.ai_usage.daily_cap_usd} / havi ${s.ai_usage.monthly_cap_usd} USD</span></div>`;
+    $("stats").innerHTML = h;
+    $("cost").textContent = "Utolsó 7 nap: " + s.ai_usage.days.slice(0, 7).map(d => `${d.day}: ${d.calls} hívás, ${d.cost_usd} USD`).join(" | ") + "\nLevelek (outbox): " + (s.outbox || []).slice(-5).map(o => `${o.kind}→${o.to} ${o.sent ? "elküldve" : "NEM küldve"}`).join(", ");
+    ["statsBox","createBox","listBox"].forEach(id => $(id).hidden = false);
+    await load();
+  } catch (e) { $("msg").textContent = "✗ " + e.message; }
+}
+async function load(){
+  const d = await api("/v1/admin/licenses?q=" + encodeURIComponent($("q").value));
+  $("rows").innerHTML = d.licenses.map(l => `<tr>
+    <td><b>${esc(l.lid)}</b><br><span class="muted">…${esc(l.key_hint)}</span></td><td>${esc(l.product)}${l.owner ? ' <span class="pill">tulajdonosi</span>' : ""}${l.test ? ' <span class="pill">teszt</span>' : ""}</td>
+    <td class="${l.status === "active" ? "ok" : "bad"}">${esc(l.status)}${l.revoke_reason ? "<br><span class='muted'>" + esc(l.revoke_reason) + "</span>" : ""}</td>
+    <td>${esc(l.name)}<br><span class="muted">${esc(l.email_masked)}</span></td>
+    <td>${l.device ? esc(l.device.name || l.device.id) + "<br><span class='muted'>" + esc(l.device.app) + " · csere 30 nap: " + l.transfers_30d + "</span>" : "<span class='muted'>nincs aktiválva</span>"}</td>
+    <td>${esc(l.source)}<br><span class="muted">${esc(l.order_id)}</span></td>
+    <td class="row">${l.status === "active" ? `<button class="danger" onclick="act('${esc(l.lid)}','revoke')">Visszavonás</button>` : `<button onclick="act('${esc(l.lid)}','reinstate')">Visszaállítás</button>`}
+      <button onclick="act('${esc(l.lid)}','reset-device')">Eszköz törlése</button><button onclick="act('${esc(l.lid)}','reissue-key')">Új kulcs</button></td></tr>`).join("");
+}
+async function act(lid, action){
+  if (!confirm(lid + ": " + action + "?")) return;
+  const reason = action === "revoke" ? (prompt("Ok (pl. visszatérítés):", "admin") || "admin") : "admin";
+  const r = await api(`/v1/admin/licenses/${lid}/${action}`, {reason});
+  if (r.license_key) $("newKey").innerHTML = `Új kulcs (${esc(lid)}) – csak most látható, küldd el a vevőnek:<br><span class="key">${esc(r.license_key)}</span>`;
+  await refresh();
+}
+async function createLic(){
+  const r = await api("/v1/admin/licenses", {product: $("cProd").value, name: $("cName").value, email: $("cEmail").value, owner: $("cOwner").checked, test: $("cTest").checked, note: "web"});
+  $("newKey").innerHTML = `${esc(r.license.lid)} létrehozva – a kulcs csak most látható:<br><span class="key">${esc(r.license_key)}</span>`;
+  await refresh();
+}
+if (token) { $("tok").value = token; refresh(); }
+</script>
+</body>
+</html>
