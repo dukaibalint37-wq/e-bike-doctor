@@ -110,7 +110,8 @@ class Mailer:
         status, body = self._http_post(GOOGLE_TOKEN_URL, {}, {"client_id": _env("GMAIL_CLIENT_ID"), "client_secret": _env("GMAIL_CLIENT_SECRET"),
                                                               "refresh_token": _env("GMAIL_REFRESH_TOKEN"), "grant_type": "refresh_token"}, form=True)
         if status != 200:
-            raise RuntimeError(f"gmail token HTTP {status}")
+            # invalid_grant = the owner revoked access, the consent screen is still in "Testing" (7-day tokens) or the token expired
+            raise RuntimeError("gmail_token_revoked" if "invalid_grant" in (body or "") else f"gmail_token_http_{status}")
         d = json.loads(body)
         Mailer._gmail_token = (d["access_token"], time.time() + int(d.get("expires_in", 3600)))
         return d["access_token"]
@@ -156,18 +157,25 @@ class Mailer:
                     entry["error"] = f"HTTP {status}"
                     logger.error("mail rejected kind=%s provider=%s status=%s detail=%s", kind, self.provider, status, _redact(resp)[:200])
             except Exception as exc:   # never break the webhook because of mail
-                entry["error"] = type(exc).__name__
+                entry["error"] = str(exc)[:40] if isinstance(exc, RuntimeError) else type(exc).__name__
                 logger.error("mail failed kind=%s provider=%s error=%s", kind, self.provider, type(exc).__name__)
         else:
             entry["error"] = "not_configured"
             logger.warning("mail not sent (no mail provider configured) kind=%s to=%s", kind, _mask(to))
         try:
+            if entry.get("error") != "not_configured":
+                self.store.set("mail:health", {"t": entry["t"], "ok": entry["sent"], "error": entry.get("error", ""), "provider": entry["provider"]}, 400 * 86_400)
             box = self.store.get("mail:outbox") or []
             box = (box if isinstance(box, list) else [])[-49:] + [entry | {"body_preview": _redact(body)[:400]}]
             self.store.set("mail:outbox", box, 90 * 86_400)
         except Exception:
             pass
         return entry
+
+
+def health(store):
+    h = store.get("mail:health")
+    return h if isinstance(h, dict) else {}
 
 
 def _mask(e):

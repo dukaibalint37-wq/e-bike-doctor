@@ -820,6 +820,7 @@ def admin_dashboard(mode: str = "live", x_admin_token: Optional[str] = Header(de
             "interest": interest_stats,
             "config": {"shop_mode": SHOP.mode, "mail_provider": MAILER.provider, "mail_configured": MAILER.configured,
                        "download_bucket": s3presign.configured(), "lease_signing": LICENSES.lease.available,
+                       "mail_health": mailer_mod.health(STORE),
                        "lemonsqueezy_map": bool(shop_mod.product_map()), "webhook_secret": bool(os.getenv("LEMONSQUEEZY_WEBHOOK_SECRET", "").strip()),
                        "cors_origins": CORS_ORIGINS, "admin_2fa": ADMIN_AUTH.configured,
                        "header_token_enabled": os.getenv("ADMIN_HEADER_TOKEN", "1").strip() != "0", "store": STORE.kind},

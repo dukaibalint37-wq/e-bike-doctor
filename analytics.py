@@ -77,7 +77,8 @@ class Visits:
             self.store.incr(f"vis:{d}:l:{lang}", KEEP)
         self._bump(f"vis:{d}:pages", path, 300)
         ref = _clean_ref(ref_host)
-        if ref and ref != own_host:
+        own = {h.strip().lower() for h in (own_host or "").split(",") if h.strip()}   # several hosts during a domain move
+        if ref and ref not in own:
             self._bump(f"vis:{d}:refs", ref, 100)
         return True
 

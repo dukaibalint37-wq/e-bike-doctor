@@ -106,6 +106,34 @@ class VisitsTest(unittest.TestCase):
         self.assertNotIn("k1", dump); self.assertNotIn("Mozilla", dump)                   # no client key / UA stored
 
 
+class DomainMoveTest(unittest.TestCase):
+    def test_several_own_hosts_during_domain_move(self):
+        st = MemoryStore(); v = AN.Visits(st); ua = "Mozilla/5.0 Chrome/130"
+        own = "ebikedoctorpro.pages.dev,www.ebikedoctor.hu"
+        v.hit("/hu/", "ebikedoctorpro.pages.dev", ua, "a", own); v.hit("/hu/", "www.ebikedoctor.hu", ua, "b", own); v.hit("/hu/", "www.google.com", ua, "c", own)
+        r = v.report(1)
+        self.assertEqual(r["total_30d"], 3); self.assertEqual([x["k"] for x in r["top_referrers"]], ["www.google.com"])
+        self.assertEqual(r["top_pages"][0], {"k": "/hu/", "n": 3})     # paths are domain independent -> stats survive a domain move
+
+
+class MailHealthTest(Base):
+    def test_revoked_gmail_token_is_reported(self):
+        os.environ.pop("RESEND_API_KEY", None)
+        os.environ.update({"GMAIL_CLIENT_ID": "c", "GMAIL_CLIENT_SECRET": "s", "GMAIL_REFRESH_TOKEN": "r"})
+        M.Mailer._gmail_token = (None, 0.0)
+
+        class G(M.Mailer):
+            def _http_post(self, url, headers, payload, form=False):
+                return 400, '{"error":"invalid_grant","error_description":"Token has been expired or revoked."}'
+        try:
+            e = G(self.store).send("x@example.com", "s", "t", kind="purchase")
+            self.assertFalse(e["sent"]); self.assertEqual(e["error"], "gmail_token_revoked")
+            self.assertEqual(M.health(self.store)["error"], "gmail_token_revoked"); self.assertFalse(M.health(self.store)["ok"])
+        finally:
+            for k in ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN"):
+                os.environ.pop(k, None)
+
+
 class SeparationTest(Base):
     def test_live_shop_ignores_test_orders_and_stats_are_separated(self):
         raw = ls_event(order_id="t1")
