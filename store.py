@@ -54,6 +54,9 @@ class MemoryStore:
             self._d[key] = (value, time.time() + ttl)
             self._purge(time.time())
 
+    def mget(self, keys):
+        return [self.get(k) for k in keys]
+
 
 class UpstashStore:
     kind = "upstash"
@@ -65,10 +68,10 @@ class UpstashStore:
         # STORE_KEY_PREFIX: separate namespace (e.g. "stg:" for the staging service). Production uses no prefix.
         self.p = prefix
 
-    def _pipeline(self, commands):
+    def _pipeline(self, commands, timeout=None):
         req = urllib.request.Request(self.url + "/pipeline", data=json.dumps(commands).encode(),
                                      headers={"Authorization": "Bearer " + self.token, "Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=self.timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
             return [x.get("result") for x in json.loads(r.read().decode())]
 
     def incr(self, key, ttl, amount=1):
@@ -87,6 +90,17 @@ class UpstashStore:
 
     def set(self, key, value, ttl):
         self._pipeline([["SET", self.p + key, json.dumps(value), "EX", str(int(ttl))]])
+
+    def mget(self, keys):
+        """Many GETs in one HTTPS round trip (chunks of 250)."""
+        out = []
+        for i in range(0, len(keys), 250):
+            for res in self._pipeline([["GET", self.p + k] for k in keys[i:i + 250]], timeout=10):
+                try:
+                    out.append(None if res is None else json.loads(res))
+                except (ValueError, TypeError):
+                    out.append(res)
+        return out
 
 
 class FailSafeStore:
@@ -112,6 +126,15 @@ class FailSafeStore:
 
     def set(self, key, value, ttl):
         return self._call("set", key, value, ttl)
+
+    def mget(self, keys):
+        return self._call("mget", keys)
+
+
+def mget(store, keys):
+    """Batch read on any store (falls back to single GETs)."""
+    keys = list(keys)
+    return store.mget(keys) if hasattr(store, "mget") else [store.get(k) for k in keys]
 
 
 def make_store():

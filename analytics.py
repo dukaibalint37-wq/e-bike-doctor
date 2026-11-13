@@ -92,19 +92,20 @@ class Visits:
         self.store.set(key, m, KEEP)
 
     def report(self, days=30):
+        from store import mget
         out, pages, refs = [], {}, {}
         now = self.clock()
-        for i in range(days):
-            d = _day(now - i * 86_400)
-            row = {"day": d, "total": int(self.store.get(f"vis:{d}:total") or 0)}
-            row["sections"] = {s: int(self.store.get(f"vis:{d}:s:{s}") or 0) for s in SECTIONS}
-            row["langs"] = {l: int(self.store.get(f"vis:{d}:l:{l}") or 0) for l in LANGS}
+        dlist = [_day(now - i * 86_400) for i in range(days)]
+        per = ["total"] + [f"s:{s}" for s in SECTIONS] + [f"l:{l}" for l in LANGS] + ["pages", "refs"]
+        vals = mget(self.store, [f"vis:{d}:{p}" for d in dlist for p in per])
+        for i, d in enumerate(dlist):
+            v = dict(zip(per, vals[i * len(per):(i + 1) * len(per)]))
+            row = {"day": d, "total": int(v["total"] or 0), "sections": {s: int(v[f"s:{s}"] or 0) for s in SECTIONS},
+                   "langs": {l: int(v[f"l:{l}"] or 0) for l in LANGS}}
             out.append(row)
-            if i < 30:
-                for k, v in (self.store.get(f"vis:{d}:pages") or {}).items():
-                    pages[k] = pages.get(k, 0) + int(v)
-                for k, v in (self.store.get(f"vis:{d}:refs") or {}).items():
-                    refs[k] = refs.get(k, 0) + int(v)
+            for src, acc in ((v["pages"], pages), (v["refs"], refs)):
+                for k, c in (src if isinstance(src, dict) else {}).items():
+                    acc[k] = acc.get(k, 0) + int(c)
         top = lambda m, n: [{"k": k, "n": v} for k, v in sorted(m.items(), key=lambda x: -x[1])[:n]]
         return {"days": out, "top_pages": top(pages, 25), "top_referrers": top(refs, 15),
                 "total_30d": sum(r["total"] for r in out[:30]), "total_7d": sum(r["total"] for r in out[:7])}

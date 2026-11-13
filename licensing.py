@@ -68,6 +68,11 @@ class StrictStore:
     def incr(self, key, ttl, amount=1):
         return self._c("incr", key, ttl, amount)
 
+    def mget(self, keys):
+        if not hasattr(self.s, "mget"):
+            return [self.get(k) for k in keys]
+        return self._c("mget", keys)
+
 
 # ----------------------------------------------------------------------------------------------------------- keys
 def _check_char(body):
@@ -377,13 +382,10 @@ class LicenseService:
         return [r for r in (self._get(i) for i in (ids if isinstance(ids, list) else [])) if r]
 
     def all(self, limit=2000):
+        from store import mget
         n = int(self.store.get("lic:seq") or 0)
-        out = []
-        for i in range(n, max(0, n - limit), -1):
-            r = self._get(f"L{i:06d}")
-            if r:
-                out.append(r)
-        return out
+        ids = [f"L{i:06d}" for i in range(n, max(0, n - limit), -1)]
+        return [r for r in mget(self.store, [self._rec_key(i) for i in ids]) if isinstance(r, dict)]
 
     def search(self, q="", limit=200):
         q = (q or "").strip()

@@ -135,10 +135,11 @@ class InterestList:
 
     # ---- admin
     def entries(self):
+        from store import mget
         out = []
         idx = self.store.get("int:index") or []
-        for eh in (idx if isinstance(idx, list) else []):
-            rec = self.store.get("int:r:" + eh)
+        idx = idx if isinstance(idx, list) else []
+        for eh, rec in zip(idx, mget(self.store, ["int:r:" + e for e in idx])):
             if isinstance(rec, dict) and rec.get("email"):
                 out.append({"id": eh[:12], **{k: rec.get(k) for k in ("email", "name", "lang", "interests", "role", "status", "created", "confirmed_at")}})
         return out

@@ -226,15 +226,11 @@ class Shop:
         return list(reversed(o))
 
     def downloads_daily(self, days=30):
-        out = []
-        for i in range(days):
-            d = time.strftime("%Y%m%d", time.gmtime(self.clock() - i * 86_400))
-            row = {"day": d}
-            for p in PRODUCTS:
-                for m in ("live", "test"):
-                    row[f"{p}:{m}"] = int(self.store.get(f"shop:dlday:{d}:{p}:{m}") or 0)
-            out.append(row)
-        return out
+        from store import mget
+        dlist = [time.strftime("%Y%m%d", time.gmtime(self.clock() - i * 86_400)) for i in range(days)]
+        cols = [f"{p}:{m}" for p in PRODUCTS for m in ("live", "test")]
+        vals = mget(self.store, [f"shop:dlday:{d}:{c}" for d in dlist for c in cols])
+        return [{"day": d, **{c: int(vals[i * len(cols) + j] or 0) for j, c in enumerate(cols)}} for i, d in enumerate(dlist)]
 
     def purge_test_data(self):
         """Removes TEST purchases from the live view: test licences are revoked + flagged 'purged' (they stop working
@@ -267,25 +263,29 @@ class Shop:
 
     # ------------------------------------------------------------------ stats
     def stats(self, months=12):
-        out = []
+        from store import mget
         t = time.gmtime(self.clock())
-        y, m = t.tm_year, t.tm_mon
+        y, m, mlist = t.tm_year, t.tm_mon, []
         for _ in range(months):
-            key = f"{y}{m:02d}"
-            row = {"month": key}
-            for p in PRODUCTS:
-                for mode in ("live", "test"):
-                    row[f"{p}:{mode}"] = int(self.store.get(f"shop:sales:{key}:{p}:{mode}") or 0)
-            row["refunds"] = int(self.store.get(f"shop:refunds:{key}") or 0)
-            row["refunds_test"] = int(self.store.get(f"shop:refunds:{key}:test") or 0)
-            for cur in ("EUR", "HUF", "USD"):
-                for mode in ("live", "test"):
-                    v = int(self.store.get(f"shop:revenue_cents:{key}:{cur}:{mode}") or 0)
-                    if v:
-                        row[("revenue_" if mode == "live" else "test_revenue_") + cur] = v / 100
-            out.append(row)
+            mlist.append(f"{y}{m:02d}")
             m -= 1
             if m == 0:
                 y, m = y - 1, 12
+        fields = [(f"{p}:{mode}", f"shop:sales:{{k}}:{p}:{mode}") for p in PRODUCTS for mode in ("live", "test")]
+        fields += [("refunds", "shop:refunds:{k}"), ("refunds_test", "shop:refunds:{k}:test")]
+        fields += [(("revenue_" if mode == "live" else "test_revenue_") + cur, f"shop:revenue_cents:{{k}}:{cur}:{mode}")
+                   for cur in ("EUR", "HUF", "USD") for mode in ("live", "test")]
+        vals = mget(self.store, [tpl.format(k=k) for k in mlist for _, tpl in fields])
+        out = []
+        for i, k in enumerate(mlist):
+            row = {"month": k}
+            for j, (name, _) in enumerate(fields):
+                v = int(vals[i * len(fields) + j] or 0)
+                if name.startswith(("revenue_", "test_revenue_")):
+                    if v:
+                        row[name] = v / 100
+                else:
+                    row[name] = v
+            out.append(row)
         return {"mode": self.mode, "months": out, "rejected_signatures": int(self.store.get("shop:rejected_sig") or 0),
                 "downloads": {p: int(self.store.get(f"shop:downloads:{p}") or 0) for p in PRODUCTS}}

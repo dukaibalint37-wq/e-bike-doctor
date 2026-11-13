@@ -294,7 +294,7 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:24px}
     api('/v1/admin/test-data/purge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: c }) }).then(function (r) { return r.json(); })
       .then(function (j) { $('#purgeMsg').className = 'msg ok'; $('#purgeMsg').textContent = 'Kész: ' + j.purged_licences.length + ' tesztlicenc leválasztva.'; load(); });
   });
-  setInterval(function () { if (!$('#app').classList.contains('hidden') && !document.hidden) load(); }, 120000);
+  setInterval(function () { if (!$('#app').classList.contains('hidden') && !document.hidden) load(); }, 600000);
   fetch('/v1/admin/session', { credentials: 'same-origin' }).then(function (r) { return r.json(); }).then(function (j) { if (j.ok) showApp(); else showLogin(); }).catch(showLogin);
 })();
 </script>

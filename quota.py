@@ -211,11 +211,12 @@ class QuotaManager:
                     self.on_cost_warning(period, lvl, spent, cap)
 
     def usage(self, days=31):
-        out, now = [], time.time()
-        for i in range(days):
-            d = today(now - i * DAY)
-            out.append({"day": d, "calls": int(self.store.get(f"usage:{d}:calls") or 0), "tokens": int(self.store.get(f"usage:{d}:tokens") or 0),
-                        "cost_usd": round((self.store.get(f"cost:{d}") or 0) / 1_000_000, 4)})
+        from store import mget
+        now = time.time()
+        dlist = [today(now - i * DAY) for i in range(days)]
+        vals = mget(self.store, [k for d in dlist for k in (f"usage:{d}:calls", f"usage:{d}:tokens", f"cost:{d}")])
+        out = [{"day": d, "calls": int(vals[3 * i] or 0), "tokens": int(vals[3 * i + 1] or 0), "cost_usd": round((vals[3 * i + 2] or 0) / 1_000_000, 4)}
+               for i, d in enumerate(dlist)]
         return {"days": out, "month": month(), "month_cost_usd": round((self.store.get(f"cost-m:{month()}") or 0) / 1_000_000, 4),
                 "daily_cap_usd": _float("DAILY_COST_LIMIT_USD", 0.0), "monthly_cap_usd": _float("MONTHLY_COST_LIMIT_USD", 0.0)}
 
