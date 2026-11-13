@@ -34,8 +34,8 @@ def new_vars():
     p = r"C:\EBD_SIGNING\admin-2fa-production\interest-secret.txt"
     if not os.path.exists(p):
         open(p, "w").write(secrets.token_hex(32))
-    return {**adm, "INTEREST_SECRET": open(p).read().strip(), "CORS_ORIGINS": "https://ebikedoctorpro.pages.dev",
-            "SITE_URL": "https://ebikedoctorpro.pages.dev", "SITE_HOST": "ebikedoctorpro.pages.dev", "ADMIN_HEADER_TOKEN": "1"}
+    return {**adm, "INTEREST_SECRET": open(p).read().strip(), "CORS_ORIGINS": "https://e-bike-doctor-pro-website.pages.dev",
+            "SITE_URL": "https://e-bike-doctor-pro-website.pages.dev", "SITE_HOST": "e-bike-doctor-pro-website.pages.dev", "ADMIN_HEADER_TOKEN": "1"}
 
 
 def git(*a):
