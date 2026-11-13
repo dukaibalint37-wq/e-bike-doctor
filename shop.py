@@ -81,16 +81,18 @@ class Shop:
             # 3.2: test purchases never create licences on the LIVE shop (test data stays in the staging environment)
             logger.warning("TEST order webhook ignored because SHOP_MODE=live order=%s", order_id)
             return {"ok": True, "ignored": "test order while SHOP_MODE=live"}
+        attrs = data.get("attributes") or {}
         done_key = f"shop:evt:{name}:{order_id}"
+        if name == "order_refunded":      # a partial refund and a later full refund of the same order are two different events
+            done_key += ":" + str(attrs.get("status", ""))
         if self.store.get(done_key):
             return {"ok": True, "duplicate": True}
-        attrs = data.get("attributes") or {}
         custom = meta.get("custom_data") or {}
         lang = mail_templates.lang_of(custom.get("lang") if isinstance(custom, dict) else "")
         if name == "order_created":
             result = self._order_created(order_id, attrs, test_mode, lang)
         elif name == "order_refunded":
-            result = self._order_refunded(order_id, attrs)
+            result = self._order_refunded(order_id, attrs, test_mode)
         else:
             result = {"ok": True, "ignored": name}
         self.store.set(done_key, int(self.clock()), 400 * 86_400)
@@ -130,23 +132,40 @@ class Shop:
                              order_id, rec["lid"], sent.get("error"))
         return {"ok": True, "licences": issued}
 
-    def _order_refunded(self, order_id, attrs):
+    def _order_refunded(self, order_id, attrs, test_mode=False):
+        orders = self.store.get("shop:orders") or []
+        orders = orders if isinstance(orders, list) else []
+        if attrs.get("status") == "partial_refund":
+            # partial refund (e.g. goodwill discount): the buyer keeps the licence; only recorded
+            for o in orders:
+                if o.get("order") == order_id:
+                    o["partial_refund_cents"] = int(attrs.get("refunded_amount", 0) or 0)
+            self.store.set("shop:orders", orders, 800 * 86_400)
+            return {"ok": True, "partial_refund": True, "revoked": []}
         revoked = []
         for prod in PRODUCTS:
             lid = self.store.get(f"lic:order:{order_id}:{prod}")
-            if lid:
+            if lid and self.licenses.get(lid).get("status") == "active":
                 self.licenses.revoke(lid, reason="refund " + order_id)
-                revoked.append(lid)
+                revoked.append((lid, prod))
         month = time.strftime("%Y%m", time.gmtime(self.clock()))
-        mode = "test" if any(self.licenses.get(l).get("test") for l in revoked) else "live"
+        mode = "test" if test_mode or any(self.licenses.get(l).get("test") for l, _ in revoked) else "live"
         self.store.incr(f"shop:refunds:{month}" + (":test" if mode == "test" else ""), 800 * 86_400)
-        orders = self.store.get("shop:orders") or []
-        if isinstance(orders, list):
-            for o in orders:
-                if o.get("order") == order_id:
-                    o["refunded"] = True
-            self.store.set("shop:orders", orders, 800 * 86_400)
-        return {"ok": True, "revoked": revoked}
+        lang = ""
+        for o in orders:
+            if o.get("order") == order_id:
+                o["refunded"] = True
+                lang = o.get("lang", "") or lang
+        self.store.set("shop:orders", orders, 800 * 86_400)
+        email = attrs.get("user_email", "")
+        for lid, prod in revoked:      # buyer notice: licence revoked (the money is returned by Lemon Squeezy)
+            if not email:
+                break
+            subject, text, html = mail_templates.refund(prod, lang, order_id, self.licenses.get(lid).get("key_hint", ""), mode == "test")
+            sent = self.mailer.send(email, subject, text, kind="refund", html=html)
+            if not sent.get("sent"):
+                logger.error("order %s refunded, licence %s revoked, notice e-mail not sent (%s)", order_id, lid, sent.get("error"))
+        return {"ok": True, "revoked": [l for l, _ in revoked]}
 
     # ------------------------------------------------------------------ downloads
     def download_token(self, lid, product, ttl=48 * 3600):

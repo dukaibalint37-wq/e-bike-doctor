@@ -17,11 +17,26 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import s3presign  # noqa: E402
 
 cred_file, local, key = sys.argv[1], sys.argv[2], sys.argv[3].lstrip("/")
-lines = [l.strip() for l in open(cred_file, encoding="utf-8") if l.strip()]
-endpoint, bucket, akid, secret = lines[:4]
-region = lines[4] if len(lines) > 4 else "auto"
+lines = [l.strip() for l in open(cred_file, encoding="utf-8-sig") if l.strip()]
+kv = dict(l.split("=", 1) for l in lines if "=" in l and l.split("=", 1)[0].strip().isupper())
+kv = {k.strip(): v.strip() for k, v in kv.items()}
+if kv.get("R2_ENDPOINT"):      # KEY=VALUE format (R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY[, R2_REGION])
+    endpoint, bucket, akid, secret = kv["R2_ENDPOINT"], kv["R2_BUCKET"], kv["R2_ACCESS_KEY_ID"], kv["R2_SECRET_ACCESS_KEY"]
+    region = kv.get("R2_REGION", "auto")
+else:                          # legacy: one value per line
+    endpoint, bucket, akid, secret = lines[:4]
+    region = lines[4] if len(lines) > 4 else "auto"
 host = urllib.parse.urlsplit(endpoint).netloc
 path = f"/{bucket}/{key}"
+# never overwrite an existing object (an installer that buyers already download): refuse if the key exists
+EMPTY = hashlib.sha256(b"").hexdigest()
+try:
+    urllib.request.urlopen(urllib.request.Request(f"https://{host}{urllib.parse.quote(path)}", method="HEAD",
+                                                  headers=s3presign.sign_headers("HEAD", host, path, akid, secret, region, EMPTY)), timeout=30)
+    sys.exit(f"REFUSED: object {key} already exists in the bucket - use a new object key (e.g. with the version number).")
+except urllib.error.HTTPError as e:
+    if e.code != 404:
+        raise
 data = open(local, "rb").read()
 digest = hashlib.sha256(data).hexdigest()
 ctype = "application/vnd.android.package-archive" if key.endswith(".apk") else "application/octet-stream"

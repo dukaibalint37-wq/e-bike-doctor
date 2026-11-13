@@ -49,6 +49,11 @@ T = {
         "confirm_btn": "Feliratkozás megerősítése",
         "confirm_what": "Csak a Smart Hardware fejlesztéséről és indulásáról írunk – ritkán, reklám-hírlevél nélkül. Ez nem előrendelés, fizetési kötelezettség nincs.",
         "unsub": "Leiratkozás bármikor",
+        "subj_refund": "{name} – visszatérítés és licencvisszavonás",
+        "refund_intro": "A rendelésed ({order}) visszatérítése megtörtént.",
+        "refund_licence": "A rendeléshez tartozó licenc (…{hint}) ezzel érvényét vesztette: az alkalmazás a következő online ellenőrzéskor visszavált ingyenes módra, a letöltési linkek pedig nem működnek tovább.",
+        "refund_money": "A visszatérítés összegét a Lemon Squeezy (viszonteladó) utalja vissza az eredeti fizetési módra; a jóváírás a banktól függően néhány napig tarthat.",
+        "refund_mistake": "Ha nem kérted a visszatérítést, válaszolj erre a levélre vagy írj az ügyfélszolgálatnak.",
     },
     "de": {
         "subj_purchase": "{name} – Lizenzschlüssel und Download",
@@ -80,6 +85,11 @@ T = {
         "confirm_btn": "Anmeldung bestätigen",
         "confirm_what": "Wir schreiben nur über Entwicklung und Start der Smart Hardware – selten, ohne Werbe-Newsletter. Keine Vorbestellung, keine Zahlungspflicht.",
         "unsub": "Jederzeit abmelden",
+        "subj_refund": "{name} – Erstattung und Lizenzwiderruf",
+        "refund_intro": "Ihre Bestellung ({order}) wurde erstattet.",
+        "refund_licence": "Die zugehörige Lizenz (…{hint}) ist damit ungültig: Die App wechselt bei der nächsten Online-Prüfung in den kostenlosen Modus, und die Download-Links funktionieren nicht mehr.",
+        "refund_money": "Den Betrag erstattet Lemon Squeezy (Wiederverkäufer) auf die ursprüngliche Zahlungsart; die Gutschrift kann je nach Bank einige Tage dauern.",
+        "refund_mistake": "Falls Sie keine Erstattung angefordert haben, antworten Sie bitte auf diese E-Mail oder kontaktieren Sie den Support.",
     },
     "en": {
         "subj_purchase": "{name} – licence key and download",
@@ -111,6 +121,11 @@ T = {
         "confirm_btn": "Confirm sign-up",
         "confirm_what": "We only write about the development and launch of the Smart Hardware – rarely, no marketing newsletter. Not a pre-order, no payment obligation.",
         "unsub": "Unsubscribe at any time",
+        "subj_refund": "{name} – refund and licence revocation",
+        "refund_intro": "Your order ({order}) has been refunded.",
+        "refund_licence": "The licence of this order (…{hint}) is therefore no longer valid: the app switches back to the free mode at its next online check, and the download links stop working.",
+        "refund_money": "Lemon Squeezy (the reseller) returns the amount to the original payment method; depending on the bank this can take a few days.",
+        "refund_mistake": "If you did not request a refund, please reply to this e-mail or contact support.",
     },
 }
 
@@ -178,6 +193,18 @@ def resend(lang, items):
     text += ["", t["ignore"]] + _footer(t, lang)
     inner += f'<p style="font-size:12px;color:#6b7b86">{e(t["ignore"])}' + "".join(f"<br>{e(x)}" for x in _footer(t, lang)) + "</p>"
     return t["subj_resend"], "\n".join(text), _wrap(lang, inner)
+
+
+def refund(product, lang, order_id, key_hint, test):
+    """Buyer notice after a refund: the licence is revoked (the money itself is returned by Lemon Squeezy)."""
+    lang = lang_of(lang)
+    t, e, pname = T[lang], _h.escape, NAMES[product][lang]
+    paras = [t["refund_intro"].format(order=order_id), t["refund_licence"].format(hint=key_hint or "????"), t["refund_money"], t["refund_mistake"]]
+    text = ([t["test"], ""] if test else []) + [pname, ""] + [p for x in paras for p in (x, "")] + _footer(t, lang)
+    inner = (f'<p style="color:#b45309;font-weight:700">{e(t["test"])}</p>' if test else "") + \
+        f'<h2 style="margin:0 0 6px">{e(pname)}</h2>' + "".join(f"<p>{e(p)}</p>" for p in paras) + \
+        "".join(f'<p style="font-size:12px;color:#6b7b86">{e(x)}</p>' for x in _footer(t, lang))
+    return t["subj_refund"].format(name=pname), "\n".join(text).rstrip(), _wrap(lang, inner)
 
 
 def confirm(lang, confirm_url, unsub_url):

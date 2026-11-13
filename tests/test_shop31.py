@@ -140,6 +140,43 @@ class PurchaseMailTest(Base):
         self.assertNotIn("AAAAA", prev); self.assertNotIn("abc.def", prev)
 
 
+class RefundTest(Base):
+    def _buy(self, oid, lang, variant="111"):
+        raw = ls_event(order_id=oid, lang=lang, variant=variant)
+        return self.shop.handle_webhook(raw, sign(raw))["licences"][0]
+
+    def _refund(self, oid, status="refunded"):
+        raw = ls_event("order_refunded", order_id=oid, status=status)
+        return self.shop.handle_webhook(raw, sign(raw))
+
+    def test_full_refund_revokes_licence_blocks_download_and_notifies_in_buyer_language(self):
+        for oid, lang, subj in (("71", "hu", "visszatérítés és licencvisszavonás"), ("72", "de", "Erstattung und Lizenzwiderruf"),
+                                ("73", "en", "refund and licence revocation")):
+            lid = self._buy(oid, lang)
+            link = self.shop.download_link(lid, "EBD-WIN")
+            r = self._refund(oid)
+            self.assertEqual(r["revoked"], [lid])
+            self.assertEqual(self.lic.get(lid)["status"], "revoked")
+            p = self.mail.calls[-1]["payload"]
+            self.assertIn(subj, p["subject"]); self.assertIn(oid, p["text"]); self.assertIn(self.lic.get(lid)["key_hint"], p["text"])
+            self.assertIn(MT.T[lang]["test"], p["text"])                                          # test purchase is labelled
+            with self.assertRaises(L.LicenseError) as cm:
+                self.shop.resolve_download(link.split("t=", 1)[1])
+            self.assertEqual(cm.exception.code, "revoked")
+            self.assertTrue([o for o in self.shop.orders() if o["order"] == oid][0]["refunded"])
+        self.assertEqual(self.shop.stats()["months"][0]["refunds_test"], 3)
+
+    def test_partial_refund_keeps_licence_and_a_later_full_refund_still_revokes(self):
+        lid = self._buy("81", "en")
+        n = len(self.mail.calls)
+        r = self._refund("81", status="partial_refund")
+        self.assertTrue(r["partial_refund"]); self.assertEqual(self.lic.get(lid)["status"], "active"); self.assertEqual(len(self.mail.calls), n)
+        r = self._refund("81")                                                                    # not swallowed as a duplicate
+        self.assertEqual(r["revoked"], [lid]); self.assertEqual(self.lic.get(lid)["status"], "revoked")
+        self.assertTrue(self._refund("81")["duplicate"])                                          # LS retry of the same event
+        self.assertEqual(len(self.mail.calls), n + 1)                                             # exactly one notice
+
+
 class DownloadTest(Base):
     def test_sigv4_matches_the_aws_reference_vector(self):
         u = s3presign.presign_get("examplebucket.s3.amazonaws.com", "/test.txt", "AKIAIOSFODNN7EXAMPLE",
