@@ -77,6 +77,10 @@ class Shop:
         if self.mode == "test" and not test_mode:
             logger.warning("LIVE order webhook ignored because SHOP_MODE=test order=%s", order_id)
             return {"ok": True, "ignored": "live order while SHOP_MODE=test"}
+        if self.mode == "live" and test_mode and os.getenv("SHOP_ACCEPT_TEST_ORDERS", "0") != "1":
+            # 3.2: test purchases never create licences on the LIVE shop (test data stays in the staging environment)
+            logger.warning("TEST order webhook ignored because SHOP_MODE=live order=%s", order_id)
+            return {"ok": True, "ignored": "test order while SHOP_MODE=live"}
         done_key = f"shop:evt:{name}:{order_id}"
         if self.store.get(done_key):
             return {"ok": True, "duplicate": True}
@@ -118,6 +122,9 @@ class Shop:
             subject, text, html = mail_templates.purchase(prod, lang, name, key, link, test_mode)
             sent = self.mailer.send(email, subject, text, kind="purchase", html=html)
             issued.append(rec["lid"])
+            self._log_order({"t": int(self.clock()), "order": order_id, "product": prod, "mode": "test" if test_mode else "live",
+                             "total": int(attrs.get("total", 0) or 0), "currency": attrs.get("currency", ""), "lid": rec["lid"],
+                             "email": rec.get("email_masked", ""), "lang": lang, "mail_sent": bool(sent.get("sent")), "refunded": False})
             if not sent.get("sent"):
                 logger.error("order %s: licence %s created but the e-mail was not sent (%s) - buyer can use the re-send form",
                              order_id, rec["lid"], sent.get("error"))
@@ -131,7 +138,14 @@ class Shop:
                 self.licenses.revoke(lid, reason="refund " + order_id)
                 revoked.append(lid)
         month = time.strftime("%Y%m", time.gmtime(self.clock()))
-        self.store.incr(f"shop:refunds:{month}", 800 * 86_400)
+        mode = "test" if any(self.licenses.get(l).get("test") for l in revoked) else "live"
+        self.store.incr(f"shop:refunds:{month}" + (":test" if mode == "test" else ""), 800 * 86_400)
+        orders = self.store.get("shop:orders") or []
+        if isinstance(orders, list):
+            for o in orders:
+                if o.get("order") == order_id:
+                    o["refunded"] = True
+            self.store.set("shop:orders", orders, 800 * 86_400)
         return {"ok": True, "revoked": revoked}
 
     # ------------------------------------------------------------------ downloads
@@ -169,6 +183,7 @@ class Shop:
         if self.store.incr(f"shop:dl:{day}:{lid}", 2 * 86_400) > _int("DOWNLOADS_PER_LICENCE_PER_DAY", 10):
             raise LicenseError("download_limit", 429, "Too many downloads for this licence today - try again tomorrow")
         self.store.incr(f"shop:downloads:{product}", 800 * 86_400)
+        self.store.incr(f"shop:dlday:{day}:{product}:{'test' if rec.get('test') else 'live'}", 400 * 86_400)
         return url
 
     def new_download_link_for_key(self, key):
@@ -199,6 +214,57 @@ class Shop:
             self.mailer.send(email, subject, text, kind="resend", html=html)
         return {"ok": True}
 
+    # ------------------------------------------------------------------ orders log / test-data separation (3.2)
+    def _log_order(self, entry):
+        orders = self.store.get("shop:orders") or []
+        orders = (orders if isinstance(orders, list) else [])[-499:] + [entry]
+        self.store.set("shop:orders", orders, 800 * 86_400)
+
+    def orders(self, mode=None):
+        o = self.store.get("shop:orders") or []
+        o = [x for x in (o if isinstance(o, list) else []) if mode in (None, x.get("mode"))]
+        return list(reversed(o))
+
+    def downloads_daily(self, days=30):
+        out = []
+        for i in range(days):
+            d = time.strftime("%Y%m%d", time.gmtime(self.clock() - i * 86_400))
+            row = {"day": d}
+            for p in PRODUCTS:
+                for m in ("live", "test"):
+                    row[f"{p}:{m}"] = int(self.store.get(f"shop:dlday:{d}:{p}:{m}") or 0)
+            out.append(row)
+        return out
+
+    def purge_test_data(self):
+        """Removes TEST purchases from the live view: test licences are revoked + flagged 'purged' (they stop working
+        immediately, the audit trail stays), test orders leave the order log, test counters are zeroed."""
+        purged = []
+        for rec in self.licenses.all():
+            if rec.get("test") and not rec.get("purged"):
+                if rec.get("status") == "active":
+                    self.licenses.revoke(rec["lid"], reason="test data purge")
+                rec = self.licenses.get(rec["lid"])
+                rec["purged"] = True
+                self.licenses._put(rec)
+                purged.append(rec["lid"])
+        orders = self.store.get("shop:orders") or []
+        if isinstance(orders, list):
+            self.store.set("shop:orders", [o for o in orders if o.get("mode") != "test"], 800 * 86_400)
+        t = time.gmtime(self.clock())
+        y, m = t.tm_year, t.tm_mon
+        for _ in range(24):
+            key = f"{y}{m:02d}"
+            for p in PRODUCTS:
+                self.store.set(f"shop:sales:{key}:{p}:test", 0, 60)
+            for cur in ("EUR", "HUF", "USD"):
+                self.store.set(f"shop:revenue_cents:{key}:{cur}:test", 0, 60)
+            self.store.set(f"shop:refunds:{key}:test", 0, 60)
+            m -= 1
+            if m == 0:
+                y, m = y - 1, 12
+        return {"purged_licences": purged}
+
     # ------------------------------------------------------------------ stats
     def stats(self, months=12):
         out = []
@@ -211,10 +277,12 @@ class Shop:
                 for mode in ("live", "test"):
                     row[f"{p}:{mode}"] = int(self.store.get(f"shop:sales:{key}:{p}:{mode}") or 0)
             row["refunds"] = int(self.store.get(f"shop:refunds:{key}") or 0)
+            row["refunds_test"] = int(self.store.get(f"shop:refunds:{key}:test") or 0)
             for cur in ("EUR", "HUF", "USD"):
-                v = int(self.store.get(f"shop:revenue_cents:{key}:{cur}:live") or 0)
-                if v:
-                    row["revenue_" + cur] = v / 100
+                for mode in ("live", "test"):
+                    v = int(self.store.get(f"shop:revenue_cents:{key}:{cur}:{mode}") or 0)
+                    if v:
+                        row[("revenue_" if mode == "live" else "test_revenue_") + cur] = v / 100
             out.append(row)
             m -= 1
             if m == 0:

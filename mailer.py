@@ -3,11 +3,15 @@
 Providers (chosen by MAIL_PROVIDER, or automatically by which credentials exist):
 - resend : HTTPS API  (RESEND_API_KEY)          – free tier, needs a verified sending domain
 - brevo  : HTTPS API  (BREVO_API_KEY)           – free tier, verified sender address or domain
+- gmail  : Gmail API over HTTPS (GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET / GMAIL_REFRESH_TOKEN) – sends AS the owner's own Gmail
+           address: works WITHOUT an own domain and is fully authenticated (SPF/DKIM/DMARC aligned by Google). Consumer Gmail
+           sending limit applies (about 500 recipients/day). tools/gmail_oauth_setup.py creates the refresh token.
 - smtp   : SMTP_HOST/SMTP_USER/SMTP_PASSWORD     – NOTE: Render free instances block outbound SMTP ports, use an API provider
 Sender: MAIL_FROM ("E-Bike Doctor PRO <info@example.com>"), optional MAIL_REPLY_TO. Legacy SMTP_FROM is still accepted.
 No paid service is created by this code. Without a provider the message is kept in a short server-side outbox (admin page)
 with licence keys and link tokens REDACTED, so nothing secret is ever logged.
 """
+import base64
 import json
 import logging
 import os
@@ -16,12 +20,15 @@ import smtplib
 import ssl
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from email.message import EmailMessage
 from email.utils import parseaddr
 
 logger = logging.getLogger("ebike-doctor.mail")
 RESEND_URL = "https://api.resend.com/emails"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
 BREVO_URL = "https://api.brevo.com/v3/smtp/email"
 
 
@@ -40,12 +47,14 @@ class Mailer:
     @property
     def provider(self):
         p = _env("MAIL_PROVIDER").lower()
-        if p in ("resend", "brevo", "smtp"):
+        if p in ("resend", "brevo", "smtp", "gmail"):
             return p
         if _env("RESEND_API_KEY"):
             return "resend"
         if _env("BREVO_API_KEY"):
             return "brevo"
+        if _env("GMAIL_REFRESH_TOKEN"):
+            return "gmail"
         if all(_env(k) for k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD")):
             return "smtp"
         return "none"
@@ -54,14 +63,16 @@ class Mailer:
     def configured(self):
         p = self.provider
         creds = {"resend": _env("RESEND_API_KEY"), "brevo": _env("BREVO_API_KEY"),
+                 "gmail": all(_env(k) for k in ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN")),
                  "smtp": all(_env(k) for k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"))}.get(p)
         return bool(creds) and "@" in self.sender
 
     # ------------------------------------------------------------------ transport
-    def _http_post(self, url, headers, payload):
+    def _http_post(self, url, headers, payload, form=False):
         """Single place for provider HTTP calls (tests replace it). Returns (status, body_text)."""
-        req = urllib.request.Request(url, data=json.dumps(payload).encode(), method="POST",
-                                     headers={"Content-Type": "application/json", "Accept": "application/json", **headers})
+        data = urllib.parse.urlencode(payload).encode() if form else json.dumps(payload).encode()
+        ctype = "application/x-www-form-urlencoded" if form else "application/json"
+        req = urllib.request.Request(url, data=data, method="POST", headers={"Content-Type": ctype, "Accept": "application/json", **headers})
         try:
             with urllib.request.urlopen(req, timeout=15) as r:
                 return r.status, r.read().decode("utf-8", "replace")[:500]
@@ -89,6 +100,33 @@ class Mailer:
         if headers:
             payload["headers"] = headers
         return self._http_post(BREVO_URL, {"api-key": _env("BREVO_API_KEY")}, payload)
+
+    _gmail_token = (None, 0.0)
+
+    def _gmail_access_token(self):
+        tok, exp = Mailer._gmail_token
+        if tok and time.time() < exp - 60:
+            return tok
+        status, body = self._http_post(GOOGLE_TOKEN_URL, {}, {"client_id": _env("GMAIL_CLIENT_ID"), "client_secret": _env("GMAIL_CLIENT_SECRET"),
+                                                              "refresh_token": _env("GMAIL_REFRESH_TOKEN"), "grant_type": "refresh_token"}, form=True)
+        if status != 200:
+            raise RuntimeError(f"gmail token HTTP {status}")
+        d = json.loads(body)
+        Mailer._gmail_token = (d["access_token"], time.time() + int(d.get("expires_in", 3600)))
+        return d["access_token"]
+
+    def _send_gmail(self, to, subject, text, html, headers):
+        msg = EmailMessage()
+        msg["From"], msg["To"], msg["Subject"] = self.sender, to, subject
+        if _env("MAIL_REPLY_TO"):
+            msg["Reply-To"] = _env("MAIL_REPLY_TO")
+        for k, v in (headers or {}).items():
+            msg[k] = v
+        msg.set_content(text)
+        if html:
+            msg.add_alternative(html, subtype="html")
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        return self._http_post(GMAIL_SEND_URL, {"Authorization": "Bearer " + self._gmail_access_token()}, {"raw": raw})
 
     def _send_smtp(self, to, subject, text, html, headers):
         msg = EmailMessage()

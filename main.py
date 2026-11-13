@@ -29,6 +29,8 @@ import gemini_client
 import metrics as metrics_mod
 import quota as quota_mod
 import licensing as licensing_mod
+import admin_auth
+import analytics
 import interest as interest_mod
 import mailer as mailer_mod
 import s3presign
@@ -45,7 +47,7 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
 BURST_LIMIT = int(os.getenv("RATE_LIMIT_PER_10_MINUTES", "30"))
 WINDOW_SECONDS = 600
 LIMITED_PREFIXES = ("/v1/diagnose", "/v1/vision-diagnose", "/v1/chat", "/v1/smart-diagnose", "/v1/register", "/v1/report", "/v1/license", "/v1/shop",
-                    "/v1/interest")
+                    "/v1/interest", "/v1/admin/login")
 ENDPOINTS = ["/health", "/v1/register", "/v1/quota", "/v1/diagnose", "/v1/diagnose/stream", "/v1/smart-diagnose",
              "/v1/smart-diagnose/stream", "/v1/vision-diagnose", "/v1/chat", "/v1/chat/stream", "/v1/metrics", "/v1/report",
              "/v1/license/activate", "/v1/license/refresh", "/v1/license/deactivate", "/v1/shop/lemonsqueezy/webhook", "/v1/shop/download",
@@ -77,6 +79,8 @@ def _resolve_ai_subject(iid):
 QUOTA.subject_resolver = _resolve_ai_subject
 SHOP = shop_mod.Shop(LIC_STORE, LICENSES, MAILER)
 INTEREST = interest_mod.InterestList(LIC_STORE, MAILER)
+ADMIN_AUTH = admin_auth.AdminAuth(LIC_STORE)
+VISITS = analytics.Visits(STORE)
 CACHE = answer_cache.AnswerCache(STORE)
 METRICS = metrics_mod.Metrics()
 
@@ -657,8 +661,12 @@ def app_update(product: str = "EBD-WIN"):
 
 
 # ---------------------------------------------------------------------------- admin (X-Admin-Token)
-def _admin(token):
-    if not _admin_ok(token):
+def _admin(token, request=None):
+    """Header token (automation) or the 2FA web session cookie (+ CSRF header for state changes). Unknown -> 404."""
+    cookie = request.cookies.get(admin_auth.COOKIE) if request is not None and hasattr(request, "cookies") else None
+    method = getattr(request, "method", "GET") if request is not None else "GET"
+    csrf = request.headers.get("x-ebd-admin", "") if request is not None else ""
+    if not ADMIN_AUTH.allowed(token, cookie, method, csrf):
         raise HTTPException(status_code=404, detail="Not Found")
 
 
@@ -678,18 +686,26 @@ class AdminActionRequest(BaseModel):
 @app.get("/admin")
 def admin_page():
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin.html"), encoding="utf-8") as f:
-        return HTMLResponse(f.read(), headers={"Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'"})
+        page = f.read()
+    import hashlib as _hl
+    import re as _re
+    hashes = " ".join("'sha256-" + base64.b64encode(_hl.sha256(s.encode()).digest()).decode() + "'"
+                      for s in _re.findall(r"<script>(.*?)</script>", page, _re.S))
+    return HTMLResponse(page, headers={
+        "Content-Security-Policy": f"default-src 'none'; script-src {hashes}; style-src 'unsafe-inline'; img-src 'self' blob: data:; "
+                                   "connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+        "X-Robots-Tag": "noindex, nofollow"})
 
 
 @app.get("/v1/admin/licenses")
-def admin_licenses(q: str = "", x_admin_token: Optional[str] = Header(default=None)):
-    _admin(x_admin_token)
+def admin_licenses(q: str = "", x_admin_token: Optional[str] = Header(default=None), request: Request = None):
+    _admin(x_admin_token, request)
     return {"licenses": [licensing_mod.public_view(r) for r in LICENSES.search(q)]}
 
 
 @app.post("/v1/admin/licenses")
-def admin_create(req: AdminCreateRequest, x_admin_token: Optional[str] = Header(default=None)):
-    _admin(x_admin_token)
+def admin_create(req: AdminCreateRequest, x_admin_token: Optional[str] = Header(default=None), request: Request = None):
+    _admin(x_admin_token, request)
     try:
         key, rec = LICENSES.create(req.product, email=req.email, name=req.name, owner=req.owner, test=req.test, source="admin:" + req.note)
     except licensing_mod.LicenseError as exc:
@@ -698,8 +714,8 @@ def admin_create(req: AdminCreateRequest, x_admin_token: Optional[str] = Header(
 
 
 @app.post("/v1/admin/licenses/{lid}/{action}")
-def admin_action(lid: str, action: str, req: AdminActionRequest, x_admin_token: Optional[str] = Header(default=None)):
-    _admin(x_admin_token)
+def admin_action(lid: str, action: str, req: AdminActionRequest, x_admin_token: Optional[str] = Header(default=None), request: Request = None):
+    _admin(x_admin_token, request)
     try:
         if action == "revoke":
             return {"license": licensing_mod.public_view(LICENSES.revoke(lid, req.reason))}
@@ -716,8 +732,8 @@ def admin_action(lid: str, action: str, req: AdminActionRequest, x_admin_token: 
 
 
 @app.get("/v1/admin/stats")
-def admin_stats(x_admin_token: Optional[str] = Header(default=None)):
-    _admin(x_admin_token)
+def admin_stats(x_admin_token: Optional[str] = Header(default=None), request: Request = None):
+    _admin(x_admin_token, request)
     try:
         interest_stats = INTEREST.stats()
     except licensing_mod.LicenseError:
@@ -729,8 +745,8 @@ def admin_stats(x_admin_token: Optional[str] = Header(default=None)):
 
 
 @app.get("/v1/admin/interest")
-def admin_interest(format: str = "json", x_admin_token: Optional[str] = Header(default=None)):
-    _admin(x_admin_token)
+def admin_interest(format: str = "json", x_admin_token: Optional[str] = Header(default=None), request: Request = None):
+    _admin(x_admin_token, request)
     rows = INTEREST.entries()
     if format == "csv":
         import csv
@@ -748,6 +764,90 @@ def admin_interest(format: str = "json", x_admin_token: Optional[str] = Header(d
 
 
 @app.post("/v1/admin/interest/{short_id}/delete")
-def admin_interest_delete(short_id: str, x_admin_token: Optional[str] = Header(default=None)):
-    _admin(x_admin_token)
+def admin_interest_delete(short_id: str, x_admin_token: Optional[str] = Header(default=None), request: Request = None):
+    _admin(x_admin_token, request)
     return {"deleted": INTEREST.delete(short_id)}
+
+
+# ============================================================================= 3.2: owner admin (2FA), dashboard, visits
+class AdminLoginRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=200)
+    code: str = Field(min_length=6, max_length=8)
+
+
+def _cookie(value, max_age):
+    return f"{admin_auth.COOKIE}={value}; Path=/; Max-Age={max_age}; HttpOnly; Secure; SameSite=Strict"
+
+
+@app.post("/v1/admin/login")
+def admin_login(req: AdminLoginRequest, request: Request):
+    try:
+        cookie, exp = ADMIN_AUTH.login(req.password, req.code, quota_mod.ip_hash(client_ip(request)))
+    except licensing_mod.LicenseError as exc:
+        raise _lic_error(exc) from None
+    return JSONResponse({"ok": True, "expires": exp}, headers={"Set-Cookie": _cookie(cookie, exp - int(time.time()))})
+
+
+@app.post("/v1/admin/logout")
+def admin_logout(request: Request):
+    cookie = request.cookies.get(admin_auth.COOKIE) if hasattr(request, "cookies") else None
+    ADMIN_AUTH.logout(cookie, quota_mod.ip_hash(client_ip(request)))
+    return JSONResponse({"ok": True}, headers={"Set-Cookie": _cookie("", 0)})
+
+
+@app.get("/v1/admin/session")
+def admin_session(request: Request = None):
+    cookie = request.cookies.get(admin_auth.COOKIE) if request is not None and hasattr(request, "cookies") else None
+    return {"configured": ADMIN_AUTH.configured, "ok": bool(cookie and ADMIN_AUTH.session_valid(cookie))}
+
+
+@app.get("/v1/admin/dashboard")
+def admin_dashboard(mode: str = "live", x_admin_token: Optional[str] = Header(default=None), request: Request = None):
+    _admin(x_admin_token, request)
+    mode = "test" if mode == "test" else "live"
+    try:
+        interest_stats = INTEREST.stats()
+    except licensing_mod.LicenseError:
+        interest_stats = {"error": "store_unavailable"}
+    shop = SHOP.stats()
+    outbox = STORE.get("mail:outbox") or []
+    return {"mode": mode, "version": ai_core.BACKEND_VERSION, "generated": int(time.time()),
+            "environment": "staging" if os.getenv("STORE_KEY_PREFIX", "").strip() else "production",
+            "licenses": LICENSES.stats(mode), "shop": shop, "orders": SHOP.orders(mode)[:150],
+            "downloads_daily": SHOP.downloads_daily(30), "visits": VISITS.report(30),
+            "ai": {**QUOTA.usage(31), "access_mode": QUOTA.access_mode(), "ai_public": os.getenv("AI_PUBLIC", "0").strip() == "1",
+                   "daily_limit_per_licence": QUOTA.daily_limit, "provider": provider_name()},
+            "interest": interest_stats,
+            "config": {"shop_mode": SHOP.mode, "mail_provider": MAILER.provider, "mail_configured": MAILER.configured,
+                       "download_bucket": s3presign.configured(), "lease_signing": LICENSES.lease.available,
+                       "lemonsqueezy_map": bool(shop_mod.product_map()), "webhook_secret": bool(os.getenv("LEMONSQUEEZY_WEBHOOK_SECRET", "").strip()),
+                       "cors_origins": CORS_ORIGINS, "admin_2fa": ADMIN_AUTH.configured,
+                       "header_token_enabled": os.getenv("ADMIN_HEADER_TOKEN", "1").strip() != "0", "store": STORE.kind},
+            "outbox": list(reversed(outbox if isinstance(outbox, list) else []))[:30], "audit": ADMIN_AUTH.audit_log()[:40]}
+
+
+class PurgeRequest(BaseModel):
+    confirm: str = Field(default="", max_length=60)
+
+
+@app.post("/v1/admin/test-data/purge")
+def admin_purge_test(req: PurgeRequest, x_admin_token: Optional[str] = Header(default=None), request: Request = None):
+    _admin(x_admin_token, request)
+    if req.confirm != "TESZTADATOK TORLESE":
+        raise HTTPException(status_code=422, detail="Confirmation text required")
+    r = SHOP.purge_test_data()
+    ADMIN_AUTH.audit("purge_test_data", "", f"{len(r['purged_licences'])} licences")
+    return r
+
+
+@app.post("/v1/stats/hit")
+async def stats_hit(request: Request):
+    """Cookieless page-view beacon (text/plain JSON via navigator.sendBeacon, no preflight). Stores aggregates only."""
+    try:
+        raw = (await request.body())[:600]
+        d = json.loads(raw.decode("utf-8") or "{}")
+        VISITS.hit(str(d.get("p", "/")), str(d.get("r", "")), request.headers.get("user-agent", ""),
+                   quota_mod.ip_hash(client_ip(request)), os.getenv("SITE_HOST", "").strip().lower())
+    except Exception:
+        pass                                  # statistics must never produce errors for visitors
+    return JSONResponse({}, status_code=202)

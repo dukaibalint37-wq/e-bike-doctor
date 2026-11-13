@@ -400,11 +400,18 @@ class LicenseService:
         ql = q.lower()
         return [r for r in recs if ql in r["lid"].lower() or ql in r.get("name", "").lower() or ql in r.get("order_id", "").lower()][:limit]
 
-    def stats(self):
+    def stats(self, mode=None):
+        """mode None = everything (legacy), 'live' = real licences only (owner licences included), 'test' = test licences.
+        Purged test licences are never counted (only in 'purged')."""
         recs = self.all()
-        out = {p: {"total": 0, "active": 0, "revoked": 0, "activated_devices": 0, "owner": 0, "test": 0} for p in PRODUCTS}
+        out = {p: {"total": 0, "active": 0, "revoked": 0, "activated_devices": 0, "owner": 0, "test": 0, "purged": 0} for p in PRODUCTS}
         for r in recs:
             s = out[r["product"]]
+            if r.get("purged"):
+                s["purged"] += 1
+                continue
+            if mode == "live" and r.get("test") or mode == "test" and not r.get("test"):
+                continue
             s["total"] += 1
             s["revoked" if r["status"] != "active" else "active"] += 1
             s["activated_devices"] += 1 if r.get("device") else 0
@@ -415,7 +422,7 @@ class LicenseService:
 
 def public_view(rec):
     """Admin listing – never contains the key or key hash."""
-    return {k: rec.get(k) for k in ("lid", "product", "status", "owner", "test", "email_masked", "name", "source", "order_id",
+    return {k: rec.get(k) for k in ("lid", "product", "status", "owner", "test", "purged", "email_masked", "name", "source", "order_id",
                                     "created", "revoked_at", "revoke_reason", "key_hint", "activations")} | {
         "device": ({"name": rec["device"].get("name", ""), "id": rec["device"]["hash"][:8], "since": rec["device"].get("since"),
                     "last_seen": rec["device"].get("last_seen"), "app": rec["device"].get("app", "")} if rec.get("device") else None),

@@ -4,103 +4,299 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>E-Bike Doctor – Licenckezelő</title>
+<title>E-Bike Doctor PRO – Tulajdonosi admin</title>
 <style>
-  :root { --bg:#060a12; --panel:#0d1524; --panel2:#121d31; --ink:#eaf2ff; --muted:#93a4bd; --teal:#1fe0c8; --blue:#2f7bff; --line:#22314a; --red:#ff6b6b; --amber:#ffc66d; --green:#5be3a0; }
-  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.5 "Segoe UI",system-ui,sans-serif; }
-  main { max-width:1200px; margin:0 auto; padding:20px 16px 60px; }
-  h1 { font-size:22px; margin:4px 0 2px; } h2 { font-size:15px; color:var(--teal); margin:0 0 10px; }
-  .muted { color:var(--muted); font-size:12px; }
-  section { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px; margin:14px 0; }
-  input, select, button { font:inherit; color:var(--ink); background:var(--panel2); border:1px solid #2e4466; border-radius:9px; padding:7px 10px; }
-  button { cursor:pointer; font-weight:600; } button.primary { background:linear-gradient(135deg,var(--blue),var(--teal)); color:#04121f; border:0; }
-  button.danger { color:var(--red); } .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
-  table { width:100%; border-collapse:collapse; font-size:13px; } th, td { border-bottom:1px solid var(--line); padding:6px; text-align:left; vertical-align:top; }
-  th { color:var(--muted); font-weight:600; } .pill { border-radius:8px; padding:1px 7px; font-size:12px; background:#172540; }
-  .ok { color:var(--green); } .bad { color:var(--red); } .warn { color:var(--amber); }
-  .key { font-family:Consolas,monospace; font-size:15px; color:var(--teal); background:#0f2e3f; padding:8px 10px; border-radius:8px; display:inline-block; margin-top:8px; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:10px; } .stat { background:var(--panel2); border-radius:10px; padding:10px; }
-  .stat b { font-size:20px; display:block; } pre { white-space:pre-wrap; font-size:12px; color:var(--muted); margin:0; }
+:root{--bg:#04060c;--panel:#0b1626;--panel2:#0f1e33;--line:rgba(120,210,255,.16);--ink:#eef7ff;--muted:#9fb2cf;--dim:#6f83a3;--cyan:#2de2ff;--teal:#1fe0c8;--blue:#3a7bff;--amber:#ffc861;--red:#ff8a8a;--green:#4ade80}
+*{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "Segoe UI",system-ui,sans-serif}
+a{color:var(--cyan)}button,input,select{font:inherit}
+.hidden{display:none!important}
+#login{min-height:100vh;display:grid;place-items:center;padding:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:28px;width:100%;max-width:400px;box-shadow:0 30px 80px -30px #000}
+.brand{font-weight:800;font-size:20px}.brand b{color:var(--cyan)}
+label{display:grid;gap:6px;margin:14px 0;font-weight:600;font-size:14px}
+input[type=password],input[type=text],input[type=search],select{background:#050a14;border:1px solid rgba(120,210,255,.28);color:var(--ink);border-radius:10px;padding:10px 12px;width:100%}
+input:focus,select:focus,button:focus-visible{outline:2px solid var(--cyan);outline-offset:1px}
+.btn{background:linear-gradient(110deg,#2de2ff,#3a7bff);color:#04131a;border:0;border-radius:10px;padding:10px 18px;font-weight:700;cursor:pointer}
+.btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}.btn.danger{background:#5b1d24;color:#ffd6d6;border:1px solid #a33}
+.btn.sm{padding:5px 10px;font-size:13px}.btn[disabled]{opacity:.5;cursor:progress}
+.msg{min-height:1.4em;color:var(--red);font-size:14px}.msg.ok{color:var(--green)}
+header{position:sticky;top:0;z-index:5;display:flex;gap:12px;align-items:center;justify-content:space-between;padding:12px 20px;background:rgba(4,6,12,.94);border-bottom:1px solid var(--line);flex-wrap:wrap}
+.env{font-size:12px;font-weight:700;padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--green)}.env.staging{color:var(--amber);border-color:var(--amber)}
+.modes{display:flex;border:1px solid var(--line);border-radius:999px;overflow:hidden}.modes button{background:none;border:0;color:var(--muted);padding:6px 14px;cursor:pointer;font-weight:600}
+.modes button.on{background:var(--cyan);color:#04131a}.modes button.on.test{background:var(--amber)}
+nav{display:flex;gap:4px;padding:10px 20px;overflow-x:auto;border-bottom:1px solid var(--line)}
+nav button{background:none;border:0;color:var(--muted);padding:8px 12px;border-radius:8px;cursor:pointer;white-space:nowrap;font-weight:600}
+nav button.on{background:var(--panel2);color:var(--ink)}
+main{padding:20px;max-width:1300px;margin:0 auto}
+.kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;margin-bottom:18px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 16px}.kpi .v{font-size:24px;font-weight:800;overflow-wrap:anywhere}.kpi .l{color:var(--muted);font-size:13px}.kpi .s{color:var(--dim);font-size:12px}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:16px;overflow:auto}
+.box h2{font-size:16px;margin:0 0 12px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:900px){.grid2{grid-template-columns:1fr}}
+table{border-collapse:collapse;width:100%;font-size:13.5px}th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top;white-space:nowrap}th{color:var(--muted);font-weight:600}
+td.wrap{white-space:normal}.num{text-align:right}
+.ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--amber)}.muted{color:var(--muted)}
+svg.chart{width:100%;height:170px;display:block}svg.chart text{fill:var(--dim);font-size:10px}
+.bar{fill:var(--cyan)}.bar.b2{fill:var(--amber)}.bar.b3{fill:var(--teal)}
+.gauge{height:12px;background:#0a1322;border-radius:999px;overflow:hidden;border:1px solid var(--line)}.gauge i{display:block;height:100%;background:linear-gradient(90deg,var(--teal),var(--amber),var(--red))}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.banner{border:1px solid var(--amber);color:var(--amber);border-radius:12px;padding:10px 14px;margin-bottom:16px;font-size:14px}
+.empty{color:var(--dim);font-style:italic;padding:10px 0}
+footer{color:var(--dim);font-size:12px;text-align:center;padding:24px}
 </style>
 </head>
 <body>
-<main>
-  <h1>E-Bike Doctor PRO – licenckezelő</h1>
-  <div class="muted">Csak adminisztrátornak. A token csak ebben a böngészőfülben tárolódik (sessionStorage), a licenckulcsokat a szerver nem tárolja olvasható formában.</div>
+<section id="login" class="hidden" aria-labelledby="lt">
+ <form class="card" id="loginForm" autocomplete="off">
+  <div class="brand" id="lt">E-Bike Doctor <b>PRO</b> · admin</div>
+  <p class="muted" style="margin:6px 0 0;font-size:14px">Tulajdonosi felület. Belépés jelszóval és a hitelesítő alkalmazás 6 jegyű kódjával.</p>
+  <label>Jelszó<input type="password" name="password" required autocomplete="current-password"></label>
+  <label>Hitelesítő kód (6 számjegy)<input type="text" name="code" required inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"></label>
+  <button class="btn" type="submit" style="width:100%">Belépés</button>
+  <p class="msg" id="loginMsg" role="alert"></p>
+  <p class="muted" style="font-size:12px;margin:0">5 sikertelen próbálkozás után 15 percig zárolva. Minden kód csak egyszer használható.</p>
+ </form>
+</section>
 
-  <section>
-    <div class="row"><input id="tok" type="password" placeholder="ADMIN_TOKEN" style="min-width:320px" autocomplete="off">
-      <button class="primary" onclick="login()">Belépés</button><span id="msg" class="muted"></span></div>
+<div id="app" class="hidden">
+ <header>
+  <div class="row"><span class="brand">E-Bike Doctor <b>PRO</b></span><span class="env" id="env">–</span><span class="muted" id="ver" style="font-size:12px"></span></div>
+  <div class="row">
+   <div class="modes" role="group" aria-label="Adatkör"><button data-mode="live" class="on">Éles adatok</button><button data-mode="test" class="test">Tesztadatok</button></div>
+   <button class="btn ghost sm" id="refresh">Frissítés</button><button class="btn ghost sm" id="logout">Kilépés</button>
+  </div>
+ </header>
+ <nav id="tabs">
+  <button data-tab="overview" class="on">Áttekintés</button><button data-tab="revenue">Bevétel és vásárlások</button><button data-tab="licences">Licencek</button>
+  <button data-tab="downloads">Letöltések</button><button data-tab="visits">Látogatottság</button><button data-tab="ai">AI-költség</button>
+  <button data-tab="interest">Érdeklődők</button><button data-tab="system">Rendszer</button>
+ </nav>
+ <main>
+  <div class="banner hidden" id="testBanner">TESZTADATOK nézet – tesztvásárlások és tesztlicencek, nem valódi bevétel. Az éles statisztikákban nem szerepelnek.</div>
+  <section data-panel="overview">
+   <div class="kpis" id="kpis"></div>
+   <div class="grid2"><div class="box"><h2>Látogatások – 30 nap</h2><div id="ovVisits"></div></div><div class="box"><h2>AI-költség – 31 nap (USD)</h2><div id="ovAi"></div></div></div>
+   <div class="box"><h2>Legutóbbi vásárlások</h2><div id="ovOrders"></div></div>
   </section>
-
-  <section id="statsBox" hidden><h2>Összesítés</h2><div id="stats" class="grid"></div><pre id="cost" style="margin-top:10px"></pre></section>
-
-  <section id="createBox" hidden>
-    <h2>Új licenc (pl. tulajdonosi, ajándék, kézi eladás)</h2>
-    <div class="row">
-      <select id="cProd"><option value="EBD-WIN">Windows (EBD-WIN)</option><option value="EBD-AND">Android web (EBD-AND)</option></select>
-      <input id="cName" placeholder="Név / cég"><input id="cEmail" placeholder="E-mail (nem kötelező)">
-      <label><input id="cOwner" type="checkbox"> tulajdonosi</label><label><input id="cTest" type="checkbox"> teszt</label>
-      <button class="primary" onclick="createLic()">Létrehozás</button>
-    </div>
-    <div id="newKey"></div>
+  <section data-panel="revenue" class="hidden">
+   <div class="box"><h2>Havi eladások és bevétel</h2><div id="revMonths"></div><p class="muted" style="font-size:12.5px">A bevétel a Lemon Squeezy által jelentett bruttó összeg (adóval, a Lemon Squeezy díja előtt). A kifizetés USD-ben történik; a pontos elszámolás a Lemon Squeezy felületén látható.</p></div>
+   <div class="box"><h2>Vásárlások</h2><div id="revOrders"></div></div>
   </section>
-
-  <section id="listBox" hidden>
-    <h2>Licencek</h2>
-    <div class="row"><input id="q" placeholder="Keresés: L000123, név, e-mail, rendelés, kulcs" style="min-width:340px" onkeydown="if(event.key==='Enter')load()"><button onclick="load()">Keresés</button></div>
-    <table><thead><tr><th>ID</th><th>Termék</th><th>Állapot</th><th>Vevő</th><th>Eszköz</th><th>Forrás</th><th>Műveletek</th></tr></thead><tbody id="rows"></tbody></table>
+  <section data-panel="licences" class="hidden">
+   <div class="kpis" id="licKpis"></div>
+   <div class="box"><h2>Licenckeresés</h2>
+    <div class="row"><input type="search" id="licQ" placeholder="e-mail, licencazonosító (L000123), név, rendelésszám vagy licenckulcs" style="max-width:520px"><button class="btn sm" id="licSearch">Keresés</button></div>
+    <div id="licList" style="margin-top:12px"></div></div>
   </section>
-</main>
+  <section data-panel="downloads" class="hidden">
+   <div class="kpis" id="dlKpis"></div>
+   <div class="box"><h2>Napi letöltések – 30 nap</h2><div id="dlChart"></div><div id="dlTable"></div></div>
+  </section>
+  <section data-panel="visits" class="hidden">
+   <div class="kpis" id="visKpis"></div>
+   <div class="box"><h2>Oldalmegtekintések naponta</h2><div id="visChart"></div><p class="muted" style="font-size:12.5px">Sütik és személyes adat nélküli, összesített számlálás (nincs IP-cím, nincs egyedi azonosító). A Do-Not-Track / GPC jelzést küldő böngészők és a robotok nem számítanak.</p></div>
+   <div class="grid2"><div class="box"><h2>Területek (30 nap)</h2><div id="visSections"></div></div><div class="box"><h2>Nyelvek (30 nap)</h2><div id="visLangs"></div></div></div>
+   <div class="grid2"><div class="box"><h2>Legnézettebb oldalak</h2><div id="visPages"></div></div><div class="box"><h2>Hivatkozó oldalak</h2><div id="visRefs"></div></div></div>
+  </section>
+  <section data-panel="ai" class="hidden">
+   <div class="kpis" id="aiKpis"></div>
+   <div class="grid2"><div class="box"><h2>Havi keret</h2><div id="aiMonth"></div></div><div class="box"><h2>Mai keret</h2><div id="aiDay"></div></div></div>
+   <div class="box"><h2>Napi költség – 31 nap</h2><div id="aiChart"></div><div id="aiTable"></div></div>
+  </section>
+  <section data-panel="interest" class="hidden">
+   <div class="kpis" id="intKpis"></div>
+   <div class="box"><h2>Smart Hardware érdeklődők</h2><div class="row" style="margin-bottom:10px"><button class="btn sm" id="intCsv">CSV letöltése</button><span class="muted" style="font-size:12.5px">Csak megerősített címekre szabad írni. Leiratkozáskor a cím automatikusan törlődik.</span></div><div id="intList"></div></div>
+  </section>
+  <section data-panel="system" class="hidden">
+   <div class="grid2"><div class="box"><h2>Beállítások állapota</h2><div id="sysConfig"></div></div><div class="box"><h2>Tesztadatok leválasztása</h2>
+    <p class="muted" style="font-size:13.5px">Élesítés előtt: minden tesztlicenc visszavonása és „leválasztott” jelölése, a tesztrendelések törlése a naplóból, a tesztszámlálók nullázása. Az éles adatok nem változnak.</p>
+    <label>Megerősítés – írd be pontosan: TESZTADATOK TORLESE<input type="text" id="purgeConfirm" autocomplete="off"></label><button class="btn danger sm" id="purgeBtn">Tesztadatok leválasztása</button><p class="msg" id="purgeMsg"></p></div></div>
+   <div class="box"><h2>Kimenő levelek (utolsó 30, titkok nélkül)</h2><div id="sysOutbox"></div></div>
+   <div class="box"><h2>Admin-napló</h2><div id="sysAudit"></div></div>
+  </section>
+ </main>
+ <footer>Privát tulajdonosi felület · <span id="gen"></span></footer>
+</div>
+
 <script>
-const $ = id => document.getElementById(id);
-let token = sessionStorage.getItem("ebdAdmin") || "";
-function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
-async function api(path, body){
-  const r = await fetch(path, { method: body ? "POST" : "GET", headers: Object.assign({"X-Admin-Token": token}, body ? {"Content-Type":"application/json"} : {}), body: body ? JSON.stringify(body) : undefined });
-  if (!r.ok) throw new Error(r.status === 404 ? "Hibás token vagy nincs ilyen elem" : (await r.text()).slice(0, 200));
-  return r.json();
-}
-async function login(){ token = $("tok").value.trim(); sessionStorage.setItem("ebdAdmin", token); await refresh(); }
-async function refresh(){
-  try {
-    const s = await api("/v1/admin/stats");
-    $("msg").textContent = "✓ belépve · backend " + s.version + " · AI-hozzáférés: " + s.ai_access_mode + " · shop: " + s.shop.mode + (s.lease_signing_configured ? "" : " · ⚠ LEASE_SIGNING_KEY_PEM hiányzik");
-    let h = "";
-    for (const [p, v] of Object.entries(s.licenses)) h += `<div class="stat"><span class="muted">${esc(p)}</span><b>${v.active} aktív</b><span class="muted">${v.total} összes · ${v.revoked} visszavont · ${v.activated_devices} aktivált eszköz · ${v.owner} tulajdonosi · ${v.test} teszt</span></div>`;
-    const m = s.shop.months[0] || {};
-    h += `<div class="stat"><span class="muted">Eladás ${esc(m.month || "")}</span><b>${(m["EBD-WIN:live"]||0)} W · ${(m["EBD-AND:live"]||0)} A</b><span class="muted">teszt: ${(m["EBD-WIN:test"]||0)} / ${(m["EBD-AND:test"]||0)} · visszatérítés: ${m.refunds||0}</span></div>`;
-    h += `<div class="stat"><span class="muted">AI költség ${esc(s.ai_usage.month)}</span><b>${s.ai_usage.month_cost_usd} USD</b><span class="muted">plafon: napi ${s.ai_usage.daily_cap_usd} / havi ${s.ai_usage.monthly_cap_usd} USD</span></div>`;
-    $("stats").innerHTML = h;
-    $("cost").textContent = "Utolsó 7 nap: " + s.ai_usage.days.slice(0, 7).map(d => `${d.day}: ${d.calls} hívás, ${d.cost_usd} USD`).join(" | ") + "\nLevelek (outbox): " + (s.outbox || []).slice(-5).map(o => `${o.kind}→${o.to} ${o.sent ? "elküldve" : "NEM küldve"}`).join(", ");
-    ["statsBox","createBox","listBox"].forEach(id => $(id).hidden = false);
-    await load();
-  } catch (e) { $("msg").textContent = "✗ " + e.message; }
-}
-async function load(){
-  const d = await api("/v1/admin/licenses?q=" + encodeURIComponent($("q").value));
-  $("rows").innerHTML = d.licenses.map(l => `<tr>
-    <td><b>${esc(l.lid)}</b><br><span class="muted">…${esc(l.key_hint)}</span></td><td>${esc(l.product)}${l.owner ? ' <span class="pill">tulajdonosi</span>' : ""}${l.test ? ' <span class="pill">teszt</span>' : ""}</td>
-    <td class="${l.status === "active" ? "ok" : "bad"}">${esc(l.status)}${l.revoke_reason ? "<br><span class='muted'>" + esc(l.revoke_reason) + "</span>" : ""}</td>
-    <td>${esc(l.name)}<br><span class="muted">${esc(l.email_masked)}</span></td>
-    <td>${l.device ? esc(l.device.name || l.device.id) + "<br><span class='muted'>" + esc(l.device.app) + " · csere 30 nap: " + l.transfers_30d + "</span>" : "<span class='muted'>nincs aktiválva</span>"}</td>
-    <td>${esc(l.source)}<br><span class="muted">${esc(l.order_id)}</span></td>
-    <td class="row">${l.status === "active" ? `<button class="danger" onclick="act('${esc(l.lid)}','revoke')">Visszavonás</button>` : `<button onclick="act('${esc(l.lid)}','reinstate')">Visszaállítás</button>`}
-      <button onclick="act('${esc(l.lid)}','reset-device')">Eszköz törlése</button><button onclick="act('${esc(l.lid)}','reissue-key')">Új kulcs</button></td></tr>`).join("");
-}
-async function act(lid, action){
-  if (!confirm(lid + ": " + action + "?")) return;
-  const reason = action === "revoke" ? (prompt("Ok (pl. visszatérítés):", "admin") || "admin") : "admin";
-  const r = await api(`/v1/admin/licenses/${lid}/${action}`, {reason});
-  if (r.license_key) $("newKey").innerHTML = `Új kulcs (${esc(lid)}) – csak most látható, küldd el a vevőnek:<br><span class="key">${esc(r.license_key)}</span>`;
-  await refresh();
-}
-async function createLic(){
-  const r = await api("/v1/admin/licenses", {product: $("cProd").value, name: $("cName").value, email: $("cEmail").value, owner: $("cOwner").checked, test: $("cTest").checked, note: "web"});
-  $("newKey").innerHTML = `${esc(r.license.lid)} létrehozva – a kulcs csak most látható:<br><span class="key">${esc(r.license_key)}</span>`;
-  await refresh();
-}
-if (token) { $("tok").value = token; refresh(); }
+(function () {
+  'use strict';
+  var mode = 'live', data = null, tab = 'overview';
+  function $(s) { return document.querySelector(s); }
+  function el(tag, attrs, kids) {                    // safe DOM builder: values are always text (never innerHTML)
+    var e = document.createElement(tag);
+    Object.keys(attrs || {}).forEach(function (k) { if (k === 'text') e.textContent = attrs[k]; else if (k === 'cls') e.className = attrs[k]; else e.setAttribute(k, attrs[k]); });
+    (kids || []).forEach(function (c) { if (c != null) e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
+    return e;
+  }
+  function clear(n) { while (n.firstChild) n.removeChild(n.firstChild); return n; }
+  function put(id, node) { clear(document.getElementById(id)).appendChild(node); }
+  function fmtDay(d) { return d.slice(0, 4) + '-' + d.slice(4, 6) + '-' + d.slice(6, 8); }
+  function fmtTs(t) { return t ? new Date(t * 1000).toLocaleString('hu-HU') : ''; }
+  function money(v, cur) { return (Math.round(v * 100) / 100).toLocaleString('hu-HU') + ' ' + cur; }
+  function api(path, opts) {
+    opts = opts || {}; opts.credentials = 'same-origin'; opts.headers = Object.assign({ 'X-EBD-Admin': 'ebd-admin' }, opts.headers || {});
+    return fetch(path, opts).then(function (r) { if (r.status === 404 || r.status === 401) { showLogin(); throw new Error('auth'); } return r; });
+  }
+  function table(cols, rows, empty) {
+    if (!rows.length) return el('div', { cls: 'empty', text: empty || 'Nincs adat.' });
+    var t = el('table'), h = el('tr');
+    cols.forEach(function (c) { h.appendChild(el('th', { text: c[0], cls: c[2] || '' })); });
+    t.appendChild(el('thead', {}, [h]));
+    var b = el('tbody');
+    rows.forEach(function (r) { var tr = el('tr'); cols.forEach(function (c) { var v = c[1](r); tr.appendChild(v instanceof Node ? el('td', { cls: c[2] || '' }, [v]) : el('td', { text: v == null ? '' : String(v), cls: c[2] || '' })); }); b.appendChild(tr); });
+    t.appendChild(b); return t;
+  }
+  function kpis(id, items) { var w = clear(document.getElementById(id)); items.forEach(function (k) { w.appendChild(el('div', { cls: 'kpi' }, [el('div', { cls: 'v', text: k[0] }), el('div', { cls: 'l', text: k[1] }), k[2] ? el('div', { cls: 's', text: k[2] }) : null])); }); }
+  function bars(series, labels, opts) {
+    var NS = 'http://www.w3.org/2000/svg', W = 600, H = 170, P = 22, n = labels.length; opts = opts || {};
+    var tot = labels.map(function (_, i) { return series.reduce(function (a, s) { return a + (s.v[i] || 0); }, 0); });
+    var max = Math.max.apply(null, tot.concat([opts.min || 1]));
+    var svg = document.createElementNS(NS, 'svg'); svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H); svg.setAttribute('class', 'chart'); svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', opts.label || 'diagram');
+    var bw = (W - P) / n;
+    labels.forEach(function (lab, i) {
+      var y = H - P;
+      series.forEach(function (s) {
+        var h = (s.v[i] || 0) / max * (H - P - 14); if (h <= 0) return;
+        var r = document.createElementNS(NS, 'rect'); r.setAttribute('x', P + i * bw + 1); r.setAttribute('width', Math.max(1, bw - 2)); r.setAttribute('y', y - h); r.setAttribute('height', h); r.setAttribute('class', 'bar ' + (s.cls || ''));
+        var tt = document.createElementNS(NS, 'title'); tt.textContent = lab + ' – ' + (s.name || '') + ': ' + (Math.round((s.v[i] || 0) * 10000) / 10000); r.appendChild(tt);
+        svg.appendChild(r); y -= h;
+      });
+      if (i % Math.ceil(n / 8) === 0) { var t = document.createElementNS(NS, 'text'); t.setAttribute('x', P + i * bw); t.setAttribute('y', H - 6); t.textContent = lab; svg.appendChild(t); }
+    });
+    var m = document.createElementNS(NS, 'text'); m.setAttribute('x', 0); m.setAttribute('y', 10); m.textContent = opts.fmt ? opts.fmt(max) : String(max); svg.appendChild(m);
+    return svg;
+  }
+  function gauge(spent, cap) {
+    var pct = cap > 0 ? Math.min(100, spent / cap * 100) : 0;
+    return el('div', {}, [el('div', { cls: 'gauge' }, [el('i', { style: 'width:' + pct.toFixed(1) + '%' })]),
+      el('p', { text: spent.toFixed(4) + ' / ' + (cap > 0 ? cap.toFixed(2) : 'nincs keret') + ' USD (' + pct.toFixed(1) + '%)', cls: pct >= 80 ? 'warn' : 'muted' })]);
+  }
+  var PNAME = function (p) { return p === 'EBD-WIN' ? 'Windows' : 'Android'; };
+
+  function render() {
+    var d = data; if (!d) return;
+    $('#env').textContent = d.environment === 'staging' ? 'TESZTKÖRNYEZET (staging)' : 'ÉLES SZERVER';
+    $('#env').className = 'env ' + d.environment; $('#ver').textContent = 'backend ' + d.version;
+    $('#gen').textContent = 'frissítve: ' + fmtTs(d.generated);
+    $('#testBanner').classList.toggle('hidden', mode !== 'test');
+    var months = d.shop.months, cur = months[0] || {}, key = mode;
+    var sales = function (m) { return (m['EBD-WIN:' + key] || 0) + (m['EBD-AND:' + key] || 0); };
+    var rev = function (m, c) { return m[(mode === 'live' ? 'revenue_' : 'test_revenue_') + c] || 0; };
+    var revStr = function (m) { var p = ['EUR', 'HUF', 'USD'].filter(function (c) { return rev(m, c); }).map(function (c) { return money(rev(m, c), c); }); return p.length ? p.join(' + ') : '0'; };
+    var lic = d.licenses, actv = lic['EBD-WIN'].active + lic['EBD-AND'].active;
+    var dl30 = d.downloads_daily.reduce(function (a, r) { return a + (r['EBD-WIN:' + key] || 0) + (r['EBD-AND:' + key] || 0); }, 0);
+    kpis('kpis', [[revStr(cur), 'Bevétel – ' + (cur.month || ''), mode === 'test' ? 'tesztvásárlások' : 'bruttó, Lemon Squeezy szerint'],
+      [String(sales(cur)), 'Eladás ebben a hónapban', 'Windows ' + (cur['EBD-WIN:' + key] || 0) + ' · Android ' + (cur['EBD-AND:' + key] || 0)],
+      [String(actv), 'Aktív licenc', 'eszközön aktivált: ' + (lic['EBD-WIN'].activated_devices + lic['EBD-AND'].activated_devices)], [String(dl30), 'Letöltés (30 nap)'],
+      [String(d.visits.total_30d), 'Oldalmegtekintés (30 nap)', '7 nap: ' + d.visits.total_7d], ['$' + d.ai.month_cost_usd.toFixed(2), 'AI-költség – ' + d.ai.month, 'havi keret: $' + d.ai.monthly_cap_usd],
+      [String(d.interest.confirmed || 0), 'Megerősített érdeklődő', 'függőben: ' + (d.interest.pending || 0)]]);
+    var vd = d.visits.days.slice().reverse(), ad = d.ai.days.slice().reverse();
+    var vlab = vd.map(function (r) { return fmtDay(r.day).slice(5); }), alab = ad.map(function (r) { return fmtDay(r.day).slice(5); });
+    put('ovVisits', bars([{ v: vd.map(function (r) { return r.total; }), name: 'megtekintés' }], vlab, { label: 'Látogatások' }));
+    var aiBars = function () { return bars([{ v: ad.map(function (r) { return r.cost_usd; }), cls: 'b2', name: 'USD' }], alab, { min: 0.01, fmt: function (x) { return '$' + x.toFixed(3); }, label: 'AI-költség' }); };
+    put('ovAi', aiBars());
+    var ocols = [['Időpont', function (o) { return fmtTs(o.t); }], ['Rendelés', function (o) { return o.order; }], ['Termék', function (o) { return PNAME(o.product); }],
+      ['Összeg', function (o) { return money((o.total || 0) / 100, o.currency || ''); }, 'num'], ['Vevő', function (o) { return o.email; }], ['Licenc', function (o) { return o.lid; }], ['Nyelv', function (o) { return o.lang; }],
+      ['Levél', function (o) { return el('span', { cls: o.mail_sent ? 'ok' : 'bad', text: o.mail_sent ? 'elküldve' : 'NEM ment ki' }); }], ['Állapot', function (o) { return el('span', { cls: o.refunded ? 'warn' : 'ok', text: o.refunded ? 'visszatérítve' : 'fizetve' }); }]];
+    put('ovOrders', table(ocols, d.orders.slice(0, 8), 'Még nincs vásárlás.'));
+    put('revOrders', table(ocols, d.orders, 'Még nincs vásárlás.'));
+    put('revMonths', table([['Hónap', function (m) { return m.month.slice(0, 4) + '-' + m.month.slice(4); }], ['Windows', function (m) { return m['EBD-WIN:' + key]; }, 'num'], ['Android', function (m) { return m['EBD-AND:' + key]; }, 'num'],
+      ['Bevétel', function (m) { return revStr(m); }, 'num'], ['Visszatérítés', function (m) { return mode === 'live' ? m.refunds : m.refunds_test; }, 'num']], months));
+    kpis('licKpis', ['EBD-WIN', 'EBD-AND'].map(function (p) { var s = lic[p]; return [s.active + ' / ' + s.total, PNAME(p) + ' – aktív / összes', 'visszavont ' + s.revoked + ' · tulajdonosi ' + s.owner + ' · eszközön ' + s.activated_devices + (s.purged ? ' · leválasztott teszt ' + s.purged : '')]; }));
+    var dd = d.downloads_daily.slice().reverse();
+    kpis('dlKpis', [[String(d.shop.downloads['EBD-WIN'] || 0), 'Windows letöltés összesen', 'éles + teszt, induláskor nullázható'], [String(d.shop.downloads['EBD-AND'] || 0), 'Android letöltés összesen', 'éles + teszt'], [String(dl30), 'Letöltés 30 nap (' + (mode === 'live' ? 'éles' : 'teszt') + ')']]);
+    put('dlChart', bars([{ v: dd.map(function (r) { return r['EBD-WIN:' + key]; }), name: 'Windows' }, { v: dd.map(function (r) { return r['EBD-AND:' + key]; }), cls: 'b3', name: 'Android' }], dd.map(function (r) { return fmtDay(r.day).slice(5); }), { label: 'Letöltések' }));
+    put('dlTable', table([['Nap', function (r) { return fmtDay(r.day); }], ['Windows', function (r) { return r['EBD-WIN:' + key]; }, 'num'], ['Android', function (r) { return r['EBD-AND:' + key]; }, 'num']], d.downloads_daily.filter(function (r) { return r['EBD-WIN:' + key] || r['EBD-AND:' + key]; }), 'Nincs letöltés az elmúlt 30 napban.'));
+    var sec = {}, lng = {};
+    d.visits.days.forEach(function (r) { Object.keys(r.sections).forEach(function (k) { sec[k] = (sec[k] || 0) + r.sections[k]; }); Object.keys(r.langs).forEach(function (k) { lng[k] = (lng[k] || 0) + r.langs[k]; }); });
+    var NAMES = { home: 'Főoldal', android: 'Android PRO', windows: 'Windows PRO', shop: 'Webáruház', hardware: 'Smart Hardware', kb: 'Tudásbázis', codes: 'Hibakódok', displays: 'Kijelzők / P-menük', support: 'Támogatás', legal: 'Jogi oldalak', thanks: 'Köszönjük (vásárlás után)', other: 'Egyéb' };
+    kpis('visKpis', [[String(d.visits.total_30d), 'Megtekintés (30 nap)'], [String(d.visits.total_7d), 'Megtekintés (7 nap)'], [String((d.visits.days[0] || {}).total || 0), 'Ma']]);
+    put('visChart', bars([{ v: vd.map(function (r) { return r.total; }), name: 'megtekintés' }], vlab, { label: 'Látogatások' }));
+    put('visSections', table([['Terület', function (r) { return NAMES[r[0]] || r[0]; }], ['Megtekintés', function (r) { return r[1]; }, 'num']], Object.keys(sec).map(function (k) { return [k, sec[k]]; }).filter(function (r) { return r[1]; }).sort(function (a, b) { return b[1] - a[1]; }), 'Még nincs látogatás.'));
+    put('visLangs', table([['Nyelv', function (r) { return r[0].toUpperCase(); }], ['Megtekintés', function (r) { return r[1]; }, 'num']], Object.keys(lng).map(function (k) { return [k, lng[k]]; })));
+    put('visPages', table([['Oldal', function (r) { return r.k; }, 'wrap'], ['Db', function (r) { return r.n; }, 'num']], d.visits.top_pages, 'Még nincs látogatás.'));
+    put('visRefs', table([['Domain', function (r) { return r.k; }], ['Db', function (r) { return r.n; }, 'num']], d.visits.top_referrers, 'Nincs külső hivatkozó.'));
+    var today = d.ai.days[0] || { cost_usd: 0, calls: 0, tokens: 0 };
+    kpis('aiKpis', [['$' + d.ai.month_cost_usd.toFixed(4), 'Havi becsült AI-költség', d.ai.month], ['$' + today.cost_usd.toFixed(4), 'Mai költség', today.calls + ' hívás · ' + today.tokens + ' token'],
+      [d.ai.ai_public ? 'BE' : 'KI', 'AI az alkalmazásokban', 'hozzáférés: ' + d.ai.access_mode + ' · ' + d.ai.provider], [String(d.ai.daily_limit_per_licence), 'Napi kérdés / licenc']]);
+    put('aiMonth', gauge(d.ai.month_cost_usd, d.ai.monthly_cap_usd)); put('aiDay', gauge(today.cost_usd, d.ai.daily_cap_usd));
+    put('aiChart', aiBars());
+    put('aiTable', table([['Nap', function (r) { return fmtDay(r.day); }], ['Hívás', function (r) { return r.calls; }, 'num'], ['Token', function (r) { return r.tokens; }, 'num'], ['Költség (USD)', function (r) { return r.cost_usd.toFixed(4); }, 'num']], d.ai.days.filter(function (r) { return r.calls; }), 'Nincs AI-használat.'));
+    kpis('intKpis', [[String(d.interest.confirmed || 0), 'Megerősített'], [String(d.interest.pending || 0), 'Megerősítésre vár'], [String(d.interest.signups_total || 0), 'Feliratkozás összesen'], [String(d.interest.unsubscribed_total || 0), 'Leiratkozott (törölve)']]);
+    var c = d.config, yes = function (b, t, f) { return el('span', { cls: b ? 'ok' : 'warn', text: b ? (t || 'kész') : (f || 'hiányzik') }); };
+    put('sysConfig', table([['Elem', function (r) { return r[0]; }], ['Állapot', function (r) { return r[1]; }]], [
+      ['Webáruház üzemmód', el('span', { cls: c.shop_mode === 'live' ? 'ok' : 'warn', text: c.shop_mode === 'live' ? 'ÉLES' : 'TESZT' })], ['Lemon Squeezy termékek', yes(c.lemonsqueezy_map)], ['Webhook-titok', yes(c.webhook_secret)],
+      ['E-mail-küldés', yes(c.mail_configured, c.mail_provider)], ['Védett letöltési tárhely (R2)', yes(c.download_bucket)], ['Licencaláírás', yes(c.lease_signing)],
+      ['Kétlépcsős admin-belépés', yes(c.admin_2fa)], ['Fejléc-token (automatizálás)', el('span', { cls: c.header_token_enabled ? 'warn' : 'ok', text: c.header_token_enabled ? 'engedélyezve' : 'tiltva (csak 2FA)' })],
+      ['Weboldal-eredet (CORS)', el('span', { text: c.cors_origins.join(', ') || '–' })], ['Tároló', el('span', { text: c.store })]]));
+    put('sysOutbox', table([['Időpont', function (o) { return fmtTs(o.t); }], ['Típus', function (o) { return o.kind; }], ['Címzett', function (o) { return o.to; }], ['Tárgy', function (o) { return o.subject; }, 'wrap'],
+      ['Eredmény', function (o) { return el('span', { cls: o.sent ? 'ok' : 'bad', text: o.sent ? 'elküldve' : (o.error || 'hiba') }); }]], d.outbox, 'Nincs kimenő levél.'));
+    put('sysAudit', table([['Időpont', function (a) { return fmtTs(a.t); }], ['Esemény', function (a) { return a.a; }], ['Részlet', function (a) { return a.d; }]], d.audit));
+  }
+
+  function loadInterest() {
+    api('/v1/admin/interest').then(function (r) { return r.json(); }).then(function (j) {
+      put('intList', table([['E-mail', function (x) { return x.email; }], ['Név', function (x) { return x.name; }], ['Nyelv', function (x) { return x.lang; }], ['Szerep', function (x) { return x.role; }],
+        ['Érdeklődés', function (x) { return (x.interests || []).join(', '); }, 'wrap'], ['Állapot', function (x) { return el('span', { cls: x.status === 'confirmed' ? 'ok' : 'warn', text: x.status === 'confirmed' ? 'megerősítve' : 'függőben' }); }],
+        ['Feliratkozott', function (x) { return fmtTs(x.created); }],
+        ['', function (x) { var b = el('button', { cls: 'btn danger sm', text: 'Törlés' }); b.addEventListener('click', function () { if (confirm('Törlöd: ' + x.email + '?')) api('/v1/admin/interest/' + encodeURIComponent(x.id) + '/delete', { method: 'POST' }).then(loadInterest); }); return b; }]],
+        j.entries, 'Még nincs feliratkozó.'));
+    }).catch(function () { });
+  }
+
+  function searchLic() {
+    api('/v1/admin/licenses?q=' + encodeURIComponent($('#licQ').value.trim())).then(function (r) { return r.json(); }).then(function (j) {
+      var rows = j.licenses.filter(function (l) { return mode === 'test' ? l.test : !l.test; });
+      put('licList', table([['Azonosító', function (l) { return l.lid; }], ['Termék', function (l) { return PNAME(l.product); }],
+        ['Állapot', function (l) { return el('span', { cls: l.status === 'active' ? 'ok' : 'bad', text: (l.status === 'active' ? 'aktív' : 'visszavonva') + (l.owner ? ' · tulajdonosi' : '') + (l.purged ? ' · leválasztva' : '') }); }],
+        ['Vevő', function (l) { return (l.name || '') + ' ' + (l.email_masked || ''); }, 'wrap'], ['Rendelés', function (l) { return l.order_id; }], ['Létrehozva', function (l) { return fmtTs(l.created); }],
+        ['Eszköz', function (l) { return l.device ? l.device.name + ' (' + l.device.app + ')' : '–'; }], ['Kulcs vége', function (l) { return '…' + l.key_hint; }],
+        ['Művelet', function (l) {
+          var w = el('div', { cls: 'row' });
+          [['revoke', 'Visszavonás', l.status === 'active'], ['reinstate', 'Visszaállítás', l.status !== 'active' && !l.purged], ['reset-device', 'Eszköz törlése', !!l.device]].forEach(function (a) {
+            if (!a[2]) return; var b = el('button', { cls: 'btn ghost sm', text: a[1] });
+            b.addEventListener('click', function () { if (!confirm(a[1] + ': ' + l.lid + '?')) return; api('/v1/admin/licenses/' + encodeURIComponent(l.lid) + '/' + a[0], { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason: 'admin UI' }) }).then(searchLic); });
+            w.appendChild(b);
+          });
+          return w;
+        }]], rows, 'Nincs találat.'));
+    }).catch(function () { });
+  }
+
+  function load() { return api('/v1/admin/dashboard?mode=' + mode).then(function (r) { return r.json(); }).then(function (j) { data = j; render(); }).catch(function () { }); }
+  function showLogin() { $('#app').classList.add('hidden'); $('#login').classList.remove('hidden'); $('input[name=password]').focus(); }
+  function showApp() { $('#login').classList.add('hidden'); $('#app').classList.remove('hidden'); load(); }
+
+  $('#loginForm').addEventListener('submit', function (ev) {
+    ev.preventDefault(); var f = ev.target, b = f.querySelector('button'); b.disabled = true; $('#loginMsg').textContent = '';
+    fetch('/v1/admin/login', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: f.password.value, code: f.code.value.trim() }) })
+      .then(function (r) {
+        b.disabled = false; f.code.value = '';
+        if (r.ok) { f.password.value = ''; showApp(); return; }
+        $('#loginMsg').textContent = r.status === 429 ? 'Túl sok sikertelen próbálkozás – várj 15 percet.' : r.status === 503 ? 'A kétlépcsős belépés nincs beállítva a szerveren.' : 'Hibás jelszó vagy kód.';
+      }).catch(function () { b.disabled = false; $('#loginMsg').textContent = 'A szerver nem érhető el.'; });
+  });
+  $('#logout').addEventListener('click', function () { fetch('/v1/admin/logout', { method: 'POST', credentials: 'same-origin' }).then(showLogin); });
+  $('#refresh').addEventListener('click', load);
+  document.querySelectorAll('.modes button').forEach(function (b) { b.addEventListener('click', function () { mode = b.getAttribute('data-mode'); document.querySelectorAll('.modes button').forEach(function (x) { x.classList.toggle('on', x === b); }); load(); if (tab === 'licences') searchLic(); }); });
+  document.querySelectorAll('#tabs button').forEach(function (b) {
+    b.addEventListener('click', function () {
+      tab = b.getAttribute('data-tab');
+      document.querySelectorAll('#tabs button').forEach(function (x) { x.classList.toggle('on', x === b); });
+      document.querySelectorAll('[data-panel]').forEach(function (p) { p.classList.toggle('hidden', p.getAttribute('data-panel') !== tab); });
+      if (tab === 'interest') loadInterest(); if (tab === 'licences') searchLic();
+    });
+  });
+  $('#licSearch').addEventListener('click', searchLic); $('#licQ').addEventListener('keydown', function (e) { if (e.key === 'Enter') searchLic(); });
+  $('#intCsv').addEventListener('click', function () { api('/v1/admin/interest?format=csv').then(function (r) { return r.blob(); }).then(function (bl) { var a = el('a', { href: URL.createObjectURL(bl), download: 'smart-hardware-erdeklodok.csv' }); document.body.appendChild(a); a.click(); a.remove(); }); });
+  $('#purgeBtn').addEventListener('click', function () {
+    var c = $('#purgeConfirm').value.trim(); if (c !== 'TESZTADATOK TORLESE') { $('#purgeMsg').className = 'msg'; $('#purgeMsg').textContent = 'A megerősítő szöveg nem egyezik.'; return; }
+    api('/v1/admin/test-data/purge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: c }) }).then(function (r) { return r.json(); })
+      .then(function (j) { $('#purgeMsg').className = 'msg ok'; $('#purgeMsg').textContent = 'Kész: ' + j.purged_licences.length + ' tesztlicenc leválasztva.'; load(); });
+  });
+  setInterval(function () { if (!$('#app').classList.contains('hidden') && !document.hidden) load(); }, 120000);
+  fetch('/v1/admin/session', { credentials: 'same-origin' }).then(function (r) { return r.json(); }).then(function (j) { if (j.ok) showApp(); else showLogin(); }).catch(showLogin);
+})();
 </script>
 </body>
 </html>

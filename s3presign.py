@@ -44,6 +44,26 @@ def presign_get(host, path, access_key, secret_key, region, expires=300, now=Non
     return f"{scheme}://{host}{canonical_path}?{canonical_query}&X-Amz-Signature={signature}"
 
 
+def sign_headers(method, host, path, access_key, secret_key, region, payload_hash, now=None, extra=None, query=""):
+    """Header-based SigV4 (used by tools/r2_upload.py for PUT/HEAD). Returns the headers to send."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    amz_date, day = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
+    h = {"host": host, "x-amz-content-sha256": payload_hash, "x-amz-date": amz_date, **{k.lower(): v for k, v in (extra or {}).items()}}
+    names = sorted(h)
+    canonical_headers = "".join(f"{k}:{str(h[k]).strip()}\n" for k in names)
+    signed = ";".join(names)
+    canonical_request = "\n".join([method, _q(path, safe="/-_.~"), query, canonical_headers, signed, payload_hash])
+    scope = f"{day}/{region}/s3/aws4_request"
+    to_sign = "\n".join(["AWS4-HMAC-SHA256", amz_date, scope, hashlib.sha256(canonical_request.encode()).hexdigest()])
+    k = _hmac(("AWS4" + secret_key).encode(), day)
+    for part in (region, "s3", "aws4_request"):
+        k = _hmac(k, part)
+    sig = hmac.new(k, to_sign.encode(), hashlib.sha256).hexdigest()
+    out = {k2: v for k2, v in h.items() if k2 != "host"}
+    out["Authorization"] = f"AWS4-HMAC-SHA256 Credential={access_key}/{scope}, SignedHeaders={signed}, Signature={sig}"
+    return out
+
+
 def configured():
     return all(os.getenv(k, "").strip() for k in ("DOWNLOAD_S3_ENDPOINT", "DOWNLOAD_S3_BUCKET", "DOWNLOAD_S3_ACCESS_KEY_ID",
                                                   "DOWNLOAD_S3_SECRET_ACCESS_KEY"))
