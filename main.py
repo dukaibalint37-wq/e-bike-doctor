@@ -55,7 +55,7 @@ CORS_ORIGINS = [o.strip().rstrip("/") for o in os.getenv("CORS_ORIGINS", "").spl
 if CORS_ORIGINS:
     from fastapi.middleware.cors import CORSMiddleware
     app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["GET", "POST"], allow_headers=["Content-Type"],
-                       allow_credentials=False, max_age=3600)
+                       allow_credentials=False, expose_headers=["X-License-Error"], max_age=3600)
 _request_times: dict[str, deque[float]] = defaultdict(deque)
 _rate_lock = Lock()
 
