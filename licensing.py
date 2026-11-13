@@ -103,6 +103,35 @@ def key_hash(normalized):
     return hashlib.sha256((pepper + "|" + normalized).encode()).hexdigest()
 
 
+def _key_cipher():
+    """AES-256-GCM for the re-send copy of a licence key (3.1). The key is derived from a server secret, so a leaked database
+    alone reveals no licence key. Without any secret no copy is stored (re-send then explains how to get a new key)."""
+    secret = os.getenv("LICENSE_KEY_ENC_SECRET", "").strip() or os.getenv("LICENSE_KEY_PEPPER", "").strip()
+    if not secret:
+        return None
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    return AESGCM(hashlib.sha256(("ebd-key-enc|" + secret).encode()).digest())
+
+
+def encrypt_key(key, lid):
+    c = _key_cipher()
+    if not c:
+        return ""
+    nonce = secrets.token_bytes(12)
+    return _b64u(nonce + c.encrypt(nonce, key.encode(), lid.encode()))
+
+
+def decrypt_key(blob, lid):
+    c = _key_cipher()
+    if not c or not blob:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(blob + "=" * (-len(blob) % 4))
+        return c.decrypt(raw[:12], raw[12:], lid.encode()).decode()
+    except Exception:
+        return None
+
+
 def email_hash(email):
     return hashlib.sha256((email or "").strip().lower().encode()).hexdigest()
 
@@ -211,7 +240,8 @@ class LicenseService:
         rec = {"lid": lid, "product": product, "status": "active", "owner": bool(owner), "test": bool(test),
                "email_hash": email_hash(email) if email else "", "email_masked": mask_email(email), "name": (name or "")[:120],
                "source": source, "order_id": str(order_id or ""), "created": int(self.clock()), "key_hint": norm[-4:],
-               "key_hash": key_hash(norm), "device": None, "transfers": [], "activations": 0}
+               "key_hash": key_hash(norm), "key_enc": encrypt_key(key, lid), "lang": "", "device": None, "transfers": [],
+               "activations": 0}
         self._log(rec, "created", source=source)
         self.store.set("lic:k:" + rec["key_hash"], lid, TTL)
         if email:
@@ -320,7 +350,7 @@ class LicenseService:
         self.store.set("lic:k:" + rec["key_hash"], "", 60)
         key = generate_key(rec["product"])
         _, norm = parse_key(key)
-        rec["key_hash"], rec["key_hint"] = key_hash(norm), norm[-4:]
+        rec["key_hash"], rec["key_hint"], rec["key_enc"] = key_hash(norm), norm[-4:], encrypt_key(key, lid)
         self.store.set("lic:k:" + rec["key_hash"], lid, TTL)
         self._log(rec, "key_reissued"); self._put(rec)
         return key, rec
@@ -333,6 +363,18 @@ class LicenseService:
 
     def get(self, lid):
         return self._require(lid)
+
+    def recover_key(self, rec):
+        """Plain key for the re-send mail (only to the purchase e-mail address); None for licences without a stored copy."""
+        key = decrypt_key(rec.get("key_enc", ""), rec["lid"])
+        try:
+            return key if key and key_hash(parse_key(key)[1]) == rec.get("key_hash") else None
+        except LicenseError:
+            return None
+
+    def by_email(self, email):
+        ids = self.store.get("lic:email:" + email_hash(email)) or []
+        return [r for r in (self._get(i) for i in (ids if isinstance(ids, list) else [])) if r]
 
     def all(self, limit=2000):
         n = int(self.store.get("lic:seq") or 0)

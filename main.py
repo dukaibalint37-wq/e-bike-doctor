@@ -29,7 +29,9 @@ import gemini_client
 import metrics as metrics_mod
 import quota as quota_mod
 import licensing as licensing_mod
+import interest as interest_mod
 import mailer as mailer_mod
+import s3presign
 import shop as shop_mod
 from store import make_store
 
@@ -42,11 +44,18 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
 BURST_LIMIT = int(os.getenv("RATE_LIMIT_PER_10_MINUTES", "30"))
 WINDOW_SECONDS = 600
-LIMITED_PREFIXES = ("/v1/diagnose", "/v1/vision-diagnose", "/v1/chat", "/v1/smart-diagnose", "/v1/register", "/v1/report", "/v1/license", "/v1/shop")
+LIMITED_PREFIXES = ("/v1/diagnose", "/v1/vision-diagnose", "/v1/chat", "/v1/smart-diagnose", "/v1/register", "/v1/report", "/v1/license", "/v1/shop",
+                    "/v1/interest")
 ENDPOINTS = ["/health", "/v1/register", "/v1/quota", "/v1/diagnose", "/v1/diagnose/stream", "/v1/smart-diagnose",
              "/v1/smart-diagnose/stream", "/v1/vision-diagnose", "/v1/chat", "/v1/chat/stream", "/v1/metrics", "/v1/report",
              "/v1/license/activate", "/v1/license/refresh", "/v1/license/deactivate", "/v1/shop/lemonsqueezy/webhook", "/v1/shop/download",
-             "/v1/shop/download-link", "/v1/app/update"]
+             "/v1/shop/download-link", "/v1/shop/resend", "/v1/interest", "/v1/app/update"]
+# Browser access for the website forms only (the apps are not browsers and are unaffected). Empty = no CORS at all.
+CORS_ORIGINS = [o.strip().rstrip("/") for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+if CORS_ORIGINS:
+    from fastapi.middleware.cors import CORSMiddleware
+    app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["GET", "POST"], allow_headers=["Content-Type"],
+                       allow_credentials=False, max_age=3600)
 _request_times: dict[str, deque[float]] = defaultdict(deque)
 _rate_lock = Lock()
 
@@ -67,6 +76,7 @@ def _resolve_ai_subject(iid):
 
 QUOTA.subject_resolver = _resolve_ai_subject
 SHOP = shop_mod.Shop(LIC_STORE, LICENSES, MAILER)
+INTEREST = interest_mod.InterestList(LIC_STORE, MAILER)
 CACHE = answer_cache.AnswerCache(STORE)
 METRICS = metrics_mod.Metrics()
 
@@ -566,6 +576,72 @@ def shop_download_link(req: LicenseKeyRequest):
         raise _lic_error(exc) from None
 
 
+class ResendRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=200)
+    lang: Literal["hu", "de", "en"] = "en"
+
+
+@app.post("/v1/shop/resend")
+def shop_resend(req: ResendRequest, request: Request):
+    """Website form 'I lost my key / download link': mails the licences to the purchase address only (generic answer)."""
+    try:
+        return SHOP.resend(req.email, req.lang, quota_mod.ip_hash(client_ip(request)))
+    except licensing_mod.LicenseError as exc:
+        raise _lic_error(exc) from None
+
+
+# ---------------------------------------------------------------------------- Smart Hardware interest list (double opt-in)
+class InterestRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=200)
+    name: str = Field(default="", max_length=80)
+    lang: Literal["hu", "de", "en"] = "en"
+    role: str = Field(default="", max_length=20)
+    interests: list[str] = Field(default_factory=list, max_length=10)
+    consent: bool = False
+    website: str = Field(default="", max_length=200)      # honeypot – must stay empty
+
+
+PAGE_CSP = {"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"}
+
+
+@app.post("/v1/interest")
+def interest_subscribe(req: InterestRequest, request: Request):
+    try:
+        return INTEREST.subscribe(req.email, req.lang, req.interests, req.role, req.consent, quota_mod.ip_hash(client_ip(request)),
+                                  honeypot=req.website, name=req.name)
+    except licensing_mod.LicenseError as exc:
+        raise _lic_error(exc) from None
+
+
+def _interest_page(kind, lang, status=200, form_action=None):
+    return HTMLResponse(interest_mod.page(kind, lang, form_action), status_code=status, headers=PAGE_CSP)
+
+
+@app.get("/v1/interest/confirm")
+def interest_confirm(t: str = ""):
+    try:
+        lang, result = INTEREST.confirm(t)
+    except licensing_mod.LicenseError:
+        return _interest_page("invalid", "en", 503)
+    return _interest_page(result, lang, 200 if result == "confirmed" else 404)
+
+
+@app.get("/v1/interest/unsubscribe")
+def interest_unsubscribe_page(t: str = "", lang: str = "en"):
+    """GET only shows a confirmation button (mail scanners prefetch links); the POST below does the deletion."""
+    return _interest_page("unsub_ask", lang, form_action="/v1/interest/unsubscribe?t=" + t)
+
+
+@app.post("/v1/interest/unsubscribe")
+def interest_unsubscribe(t: str = ""):
+    """Also the RFC 8058 one-click target (List-Unsubscribe-Post)."""
+    try:
+        lang, result = INTEREST.unsubscribe(t)
+    except licensing_mod.LicenseError:
+        return _interest_page("invalid", "en", 503)
+    return _interest_page(result, lang or "en", 200 if result == "unsubscribed" else 404)
+
+
 UPDATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "updates")
 
 
@@ -642,6 +718,36 @@ def admin_action(lid: str, action: str, req: AdminActionRequest, x_admin_token: 
 @app.get("/v1/admin/stats")
 def admin_stats(x_admin_token: Optional[str] = Header(default=None)):
     _admin(x_admin_token)
+    try:
+        interest_stats = INTEREST.stats()
+    except licensing_mod.LicenseError:
+        interest_stats = {"error": "store_unavailable"}
     return {"licenses": LICENSES.stats(), "shop": SHOP.stats(), "ai_usage": QUOTA.usage(), "ai_access_mode": QUOTA.access_mode(),
-            "lease_signing_configured": LICENSES.lease.available, "mail_configured": MAILER.configured,
+            "lease_signing_configured": LICENSES.lease.available, "mail_configured": MAILER.configured, "mail_provider": MAILER.provider,
+            "download_bucket_configured": s3presign.configured(), "interest": interest_stats, "cors_origins": CORS_ORIGINS,
             "outbox": STORE.get("mail:outbox") or [], "version": ai_core.BACKEND_VERSION}
+
+
+@app.get("/v1/admin/interest")
+def admin_interest(format: str = "json", x_admin_token: Optional[str] = Header(default=None)):
+    _admin(x_admin_token)
+    rows = INTEREST.entries()
+    if format == "csv":
+        import csv
+        import io
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["id", "email", "name", "lang", "role", "interests", "status", "created_utc", "confirmed_utc"])
+        ts = lambda v: time.strftime("%Y-%m-%d %H:%M", time.gmtime(v)) if v else ""
+        for r in rows:
+            w.writerow([r["id"], r["email"], r.get("name") or "", r["lang"], r.get("role") or "", " ".join(r.get("interests") or []),
+                        r["status"], ts(r.get("created")), ts(r.get("confirmed_at"))])
+        return HTMLResponse(buf.getvalue(), headers={"Content-Type": "text/csv; charset=utf-8",
+                                                     "Content-Disposition": 'attachment; filename="smart-hardware-interest.csv"'})
+    return {"stats": INTEREST.stats(), "entries": rows}
+
+
+@app.post("/v1/admin/interest/{short_id}/delete")
+def admin_interest_delete(short_id: str, x_admin_token: Optional[str] = Header(default=None)):
+    _admin(x_admin_token)
+    return {"deleted": INTEREST.delete(short_id)}

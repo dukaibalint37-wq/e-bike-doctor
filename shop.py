@@ -15,12 +15,23 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 
-from licensing import PRODUCTS, LicenseError
+import mail_templates
+import s3presign
+from licensing import PRODUCTS, LicenseError, email_hash
 
 logger = logging.getLogger("ebike-doctor.shop")
 PRICES = {"EBD-WIN": ("19.99", "EUR"), "EBD-AND": ("5990", "HUF")}
+EMAIL_RE = re.compile(r"[^@\s<>\"',;]{1,64}@[A-Za-z0-9.-]{1,180}\.[A-Za-z]{2,24}")
+
+
+def _int(name, default):
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
 
 
 def verify_signature(raw: bytes, signature: str, secret: str) -> bool:
@@ -70,8 +81,10 @@ class Shop:
         if self.store.get(done_key):
             return {"ok": True, "duplicate": True}
         attrs = data.get("attributes") or {}
+        custom = meta.get("custom_data") or {}
+        lang = mail_templates.lang_of(custom.get("lang") if isinstance(custom, dict) else "")
         if name == "order_created":
-            result = self._order_created(order_id, attrs, test_mode)
+            result = self._order_created(order_id, attrs, test_mode, lang)
         elif name == "order_refunded":
             result = self._order_refunded(order_id, attrs)
         else:
@@ -85,7 +98,7 @@ class Shop:
         p = m.get(str(item.get("variant_id", ""))) or m.get(str(item.get("product_id", "")))
         return [p] if p else []
 
-    def _order_created(self, order_id, attrs, test_mode):
+    def _order_created(self, order_id, attrs, test_mode, lang=""):
         if attrs.get("status") != "paid":
             return {"ok": True, "ignored": "status " + str(attrs.get("status"))}
         products = self._products_of(attrs)
@@ -102,8 +115,12 @@ class Shop:
             self.store.incr(f"shop:sales:{month}:{prod}:{'test' if test_mode else 'live'}", 800 * 86_400)
             self.store.incr(f"shop:revenue_cents:{month}:{attrs.get('currency', 'EUR')}:{'test' if test_mode else 'live'}", 800 * 86_400, int(attrs.get("total", 0) or 0))
             link = self.download_link(rec["lid"], prod)
-            self.mailer.send(email, purchase_subject(prod), purchase_body(prod, name, key, link, test_mode), kind="purchase")
+            subject, text, html = mail_templates.purchase(prod, lang, name, key, link, test_mode)
+            sent = self.mailer.send(email, subject, text, kind="purchase", html=html)
             issued.append(rec["lid"])
+            if not sent.get("sent"):
+                logger.error("order %s: licence %s created but the e-mail was not sent (%s) - buyer can use the re-send form",
+                             order_id, rec["lid"], sent.get("error"))
         return {"ok": True, "licences": issued}
 
     def _order_refunded(self, order_id, attrs):
@@ -144,9 +161,13 @@ class Shop:
         rec = self.licenses.get(lid)
         if rec["status"] != "active" or rec["product"] != product:
             raise LicenseError("revoked", 403, "Licence is not active")
-        url = os.getenv("DOWNLOAD_URL_" + product.replace("-", "_"), "").strip()
+        # private bucket (pre-signed, a few minutes) preferred; a plain DOWNLOAD_URL_* is the legacy fallback
+        url = s3presign.object_url(product) or os.getenv("DOWNLOAD_URL_" + product.replace("-", "_"), "").strip()
         if not url:
             raise LicenseError("not_configured", 503, "Download location not configured")
+        day = time.strftime("%Y%m%d", time.gmtime(self.clock()))
+        if self.store.incr(f"shop:dl:{day}:{lid}", 2 * 86_400) > _int("DOWNLOADS_PER_LICENCE_PER_DAY", 10):
+            raise LicenseError("download_limit", 429, "Too many downloads for this licence today - try again tomorrow")
         self.store.incr(f"shop:downloads:{product}", 800 * 86_400)
         return url
 
@@ -155,6 +176,28 @@ class Shop:
         if rec["status"] != "active":
             raise LicenseError("revoked", 403, "Licence is not active")
         return self.download_link(rec["lid"], rec["product"])
+
+    # ------------------------------------------------------------------ "lost my key / link" (website form)
+    def resend(self, email, lang, ip_hash):
+        """Mails the active licences of `email` to that same address only. The response never reveals whether the address
+        is known (no enumeration); rate-limited per address and per network."""
+        email = (email or "").strip()
+        if not EMAIL_RE.fullmatch(email):
+            raise LicenseError("bad_email", 422, "Invalid e-mail address")
+        day = time.strftime("%Y%m%d", time.gmtime(self.clock()))
+        if self.store.incr(f"shop:resend_ip:{day}:{ip_hash}", 2 * 86_400) > _int("RESEND_PER_IP_PER_DAY", 10):
+            raise LicenseError("rate_limited", 429, "Too many requests today")
+        if self.store.incr(f"shop:resend_em:{day}:{email_hash(email)}", 2 * 86_400) > _int("RESEND_PER_EMAIL_PER_DAY", 3):
+            return {"ok": True}
+        items = []
+        for rec in self.licenses.by_email(email):
+            if rec.get("status") != "active":
+                continue
+            items.append((rec["product"], self.licenses.recover_key(rec), self.download_link(rec["lid"], rec["product"])))
+        if items or os.getenv("RESEND_REPLY_WHEN_UNKNOWN", "1") == "1":
+            subject, text, html = mail_templates.resend(lang, items)
+            self.mailer.send(email, subject, text, kind="resend", html=html)
+        return {"ok": True}
 
     # ------------------------------------------------------------------ stats
     def stats(self, months=12):
@@ -178,31 +221,3 @@ class Shop:
                 y, m = y - 1, 12
         return {"mode": self.mode, "months": out, "rejected_signatures": int(self.store.get("shop:rejected_sig") or 0),
                 "downloads": {p: int(self.store.get(f"shop:downloads:{p}") or 0) for p in PRODUCTS}}
-
-
-def purchase_subject(product):
-    return f"{PRODUCTS[product]['name']} – licenckulcs / Lizenzschlüssel / licence key"
-
-
-def purchase_body(product, name, key, link, test_mode):
-    price, cur = PRICES[product]
-    t = "[TESZT / TEST] " if test_mode else ""
-    return f"""{t}{PRODUCTS[product]['name']}
-
-HU – Köszönjük a vásárlást{(', ' + name) if name else ''}!
-Licenckulcs: {key}
-Letöltés (48 óráig érvényes link): {link}
-Aktiválás: a programban Licenc → Aktiválás. Egy licenc egyszerre egy készüléken aktív; készülékcsere a programból.
-
-DE – Vielen Dank für Ihren Kauf!
-Lizenzschlüssel: {key}
-Download (Link 48 Stunden gültig): {link}
-Aktivierung im Programm unter Lizenz → Aktivieren. Eine Lizenz ist gleichzeitig auf einem Gerät aktiv.
-
-EN – Thank you for your purchase!
-Licence key: {key}
-Download (link valid for 48 hours): {link}
-Activate in the app under Licence → Activate. One licence is active on one device at a time.
-
-Ár / Preis / Price: {price} {cur} (egyszeri / einmalig / one-time). Számla és visszatérítés: Lemon Squeezy.
-"""

@@ -58,10 +58,12 @@ class MemoryStore:
 class UpstashStore:
     kind = "upstash"
 
-    def __init__(self, url, token, timeout=2.5):
+    def __init__(self, url, token, timeout=2.5, prefix=""):
         self.url = url.rstrip("/")
         self.token = token
         self.timeout = timeout
+        # STORE_KEY_PREFIX: separate namespace (e.g. "stg:" for the staging service). Production uses no prefix.
+        self.p = prefix
 
     def _pipeline(self, commands):
         req = urllib.request.Request(self.url + "/pipeline", data=json.dumps(commands).encode(),
@@ -70,11 +72,12 @@ class UpstashStore:
             return [x.get("result") for x in json.loads(r.read().decode())]
 
     def incr(self, key, ttl, amount=1):
+        key = self.p + key
         res = self._pipeline([["INCRBY", key, str(amount)], ["EXPIRE", key, str(int(ttl)), "NX"]])
         return int(res[0])
 
     def get(self, key):
-        res = self._pipeline([["GET", key]])[0]
+        res = self._pipeline([["GET", self.p + key]])[0]
         if res is None:
             return None
         try:
@@ -83,7 +86,7 @@ class UpstashStore:
             return res
 
     def set(self, key, value, ttl):
-        self._pipeline([["SET", key, json.dumps(value), "EX", str(int(ttl))]])
+        self._pipeline([["SET", self.p + key, json.dumps(value), "EX", str(int(ttl))]])
 
 
 class FailSafeStore:
@@ -115,5 +118,5 @@ def make_store():
     url = os.getenv("UPSTASH_REDIS_REST_URL", "").strip()
     token = os.getenv("UPSTASH_REDIS_REST_TOKEN", "").strip()
     if url and token:
-        return FailSafeStore(UpstashStore(url, token), MemoryStore())
+        return FailSafeStore(UpstashStore(url, token, prefix=os.getenv("STORE_KEY_PREFIX", "").strip()), MemoryStore())
     return MemoryStore()
