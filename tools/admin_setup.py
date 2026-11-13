@@ -22,6 +22,9 @@ import admin_auth  # noqa: E402
 out = sys.argv[1]
 label = sys.argv[2] if len(sys.argv) > 2 else "admin"
 os.makedirs(out, exist_ok=True)
+_existing = [n for n in ("admin-password.txt", "admin-totp-uri.txt", "admin-env.json", "admin-totp-qr.png") if os.path.exists(os.path.join(out, n))]
+if _existing:   # never overwrite existing credentials (they may already be in use on a server)
+    sys.exit(f"REFUSED: {out} already contains {_existing}. Use a NEW, empty folder; existing credentials are never overwritten.")
 alphabet = string.ascii_letters + string.digits + "-_.!?"
 password = "".join(secrets.choice(alphabet) for _ in range(24))
 totp_secret = base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
@@ -29,7 +32,7 @@ uri = "otpauth://totp/" + urllib.parse.quote(f"E-Bike Doctor PRO:{label}") + "?"
     {"secret": totp_secret, "issuer": "E-Bike Doctor PRO", "algorithm": "SHA1", "digits": 6, "period": 30})
 env = {"ADMIN_PASSWORD_HASH": admin_auth.hash_password(password), "ADMIN_TOTP_SECRET": totp_secret, "ADMIN_SESSION_SECRET": secrets.token_urlsafe(48)}
 for name, content in (("admin-password.txt", password + "\n"), ("admin-totp-uri.txt", uri + "\n"), ("admin-env.json", json.dumps(env, indent=1))):
-    with open(os.path.join(out, name), "w", encoding="utf-8") as f:
+    with open(os.path.join(out, name), "x", encoding="utf-8") as f:     # 'x' = fail if the file exists
         f.write(content)
 try:
     import qrcode

@@ -20,6 +20,8 @@ import urllib.parse
 import urllib.request
 import webbrowser
 
+if os.path.exists(os.path.join(sys.argv[2], "gmail-oauth.json")):
+    sys.exit("REFUSED: gmail-oauth.json already exists in the output folder - existing tokens are never overwritten. Use a new folder.")
 client = json.load(open(sys.argv[1], encoding="utf-8"))
 client = client.get("installed") or client.get("web") or client
 out_dir = sys.argv[2]
@@ -59,6 +61,6 @@ tok = json.loads(urllib.request.urlopen(urllib.request.Request("https://oauth2.g
 if "refresh_token" not in tok:
     sys.exit("No refresh token returned - remove the app's access at myaccount.google.com/permissions and run again.")
 os.makedirs(out_dir, exist_ok=True)
-with open(os.path.join(out_dir, "gmail-oauth.json"), "w", encoding="utf-8") as f:
+with open(os.path.join(out_dir, "gmail-oauth.json"), "x", encoding="utf-8") as f:     # 'x' = never overwrite
     json.dump({"GMAIL_CLIENT_ID": client["client_id"], "GMAIL_CLIENT_SECRET": client["client_secret"], "GMAIL_REFRESH_TOKEN": tok["refresh_token"]}, f)
 print("written:", os.path.join(out_dir, "gmail-oauth.json"), "(scope: gmail.send)")
