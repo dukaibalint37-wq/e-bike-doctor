@@ -6,7 +6,7 @@ LANGS = ("hu", "de", "en")
 NAMES = {"EBD-WIN": {"hu": "E-Bike Doctor PRO – Windows", "de": "E-Bike Doctor PRO – Windows", "en": "E-Bike Doctor PRO – Windows"},
          "EBD-AND": {"hu": "E-Bike Doctor PRO – Android (webshop)", "de": "E-Bike Doctor PRO – Android (Webshop)",
                      "en": "E-Bike Doctor PRO – Android (web shop)"}}
-PRICE = {"EBD-WIN": "19,99 EUR", "EBD-AND": "5 990 Ft"}
+PRICE = {"EBD-WIN": {"hu": "19,99 €", "de": "19,99 €", "en": "€19.99"}, "EBD-AND": {"hu": "14,99 €", "de": "14,99 €", "en": "€14.99"}}
 
 
 def lang_of(v):
@@ -152,7 +152,7 @@ def purchase(product, lang, name, key, link, test):
     text = ([t["test"], ""] if test else []) + [pname, "", t["hello"].format(n=n), "", f"{t['key']}: {key}", "",
                                                f"{t['dl']}:", link, t["dl_again"], "", t["steps_title"] + ":"]
     text += [f"{i}. {s}" for i, s in enumerate(steps, 1)] + ["", t["device"], t["ai"], "", t["keep"],
-                                                              t["price"].format(price=PRICE[product])] + _footer(t, lang)
+                                                              t["price"].format(price=PRICE[product][lang])] + _footer(t, lang)
     e = _h.escape
     inner = (f'<p style="color:#b45309;font-weight:700">{e(t["test"])}</p>' if test else "") + \
         f'<h2 style="margin:0 0 6px">{e(t["hello"].format(n=n))}</h2><p style="margin:0 0 16px;color:#4b5b66">{e(pname)}</p>' \
@@ -163,7 +163,7 @@ def purchase(product, lang, name, key, link, test):
         f'<h3 style="margin:18px 0 6px">{e(t["steps_title"])}</h3><ol style="padding-left:20px;margin:0">' + \
         "".join(f"<li>{e(s)}</li>" for s in steps) + "</ol>" + \
         f'<p style="font-size:13px;color:#4b5b66">{e(t["device"])}<br>{e(t["ai"])}</p><p><b>{e(t["keep"])}</b></p>' \
-        f'<p style="font-size:12px;color:#6b7b86">{e(t["price"].format(price=PRICE[product]))}' + \
+        f'<p style="font-size:12px;color:#6b7b86">{e(t["price"].format(price=PRICE[product][lang]))}' + \
         "".join(f"<br>{e(x)}" for x in _footer(t, lang)) + "</p>"
     return t["subj_purchase"].format(name=pname), "\n".join(text), _wrap(lang, inner)
 

@@ -140,6 +140,17 @@ class PurchaseMailTest(Base):
         self.assertNotIn("AAAAA", prev); self.assertNotIn("abc.def", prev)
 
 
+class PriceTest(Base):
+    def test_both_products_are_one_time_eur_prices_in_every_language(self):
+        self.assertEqual(S.PRICES, {"EBD-WIN": ("19.99", "EUR"), "EBD-AND": ("14.99", "EUR")})
+        want = {"EBD-WIN": {"hu": "19,99 €", "de": "19,99 €", "en": "€19.99"}, "EBD-AND": {"hu": "14,99 €", "de": "14,99 €", "en": "€14.99"}}
+        for prod, langs in want.items():
+            for lang, price in langs.items():
+                _, text, html = MT.purchase(prod, lang, "", "EBDX-AAAAA-BBBBB-CCCCC-DDDDD", "https://x/dl", False)
+                self.assertIn(price, text); self.assertIn(price, html)
+                self.assertNotIn("Ft", text); self.assertNotIn("HUF", text)
+
+
 class RefundTest(Base):
     def _buy(self, oid, lang, variant="111"):
         raw = ls_event(order_id=oid, lang=lang, variant=variant)

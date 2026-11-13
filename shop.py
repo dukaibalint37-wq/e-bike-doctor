@@ -23,7 +23,7 @@ import s3presign
 from licensing import PRODUCTS, LicenseError, email_hash
 
 logger = logging.getLogger("ebike-doctor.shop")
-PRICES = {"EBD-WIN": ("19.99", "EUR"), "EBD-AND": ("5990", "HUF")}
+PRICES = {"EBD-WIN": ("19.99", "EUR"), "EBD-AND": ("14.99", "EUR")}   # one EUR store, one-time purchases
 EMAIL_RE = re.compile(r"[^@\s<>\"',;]{1,64}@[A-Za-z0-9.-]{1,180}\.[A-Za-z]{2,24}")
 
 
