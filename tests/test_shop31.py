@@ -336,6 +336,27 @@ class MailSafetyTest(Base):
         finally:
             os.environ.pop("MAIL_PROVIDER"); os.environ.pop("MAIL_FALLBACK")
 
+    def test_provider_calls_send_an_explicit_user_agent(self):
+        """Resend answers 403 (Cloudflare 1010) to the default Python-urllib agent - seen on staging 2026-11-14."""
+        seen = {}
+
+        class Resp:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return b'{"id":"x"}'
+
+        def fake_urlopen(req, timeout=None):
+            seen.update({k.lower(): v for k, v in req.header_items()})
+            return Resp()
+        orig = M.urllib.request.urlopen
+        M.urllib.request.urlopen = fake_urlopen
+        try:
+            M.Mailer(self.store)._http_post(M.RESEND_URL, {"Authorization": "Bearer x"}, {"a": 1})
+        finally:
+            M.urllib.request.urlopen = orig
+        self.assertTrue(seen["user-agent"].startswith("EBikeDoctorPRO-Backend/")); self.assertNotIn("python", seen["user-agent"].lower())
+
     def test_purge_removes_test_mails_from_the_queue(self):
         self.beh.update(gmail="token", resend="422")
         self._buy("521")

@@ -117,7 +117,9 @@ class Mailer:
         """Single place for provider HTTP calls (tests replace it). Returns (status, body_text)."""
         data = urllib.parse.urlencode(payload).encode() if form else json.dumps(payload).encode()
         ctype = "application/x-www-form-urlencoded" if form else "application/json"
-        req = urllib.request.Request(url, data=data, method="POST", headers={"Content-Type": ctype, "Accept": "application/json", **headers})
+        # an explicit User-Agent is required: the Resend API answers 403 to the default "Python-urllib" agent (seen on staging)
+        req = urllib.request.Request(url, data=data, method="POST", headers={"Content-Type": ctype, "Accept": "application/json",
+                                                                             "User-Agent": "EBikeDoctorPRO-Backend/3.2 (+https://ebikedoctorpro.com)", **headers})
         try:
             with urllib.request.urlopen(req, timeout=15) as r:
                 return r.status, r.read().decode("utf-8", "replace")[:500]
