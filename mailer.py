@@ -8,6 +8,10 @@ Providers (chosen by MAIL_PROVIDER, or automatically by which credentials exist)
            sending limit applies (about 500 recipients/day). tools/gmail_oauth_setup.py creates the refresh token.
 - smtp   : SMTP_HOST/SMTP_USER/SMTP_PASSWORD     – NOTE: Render free instances block outbound SMTP ports, use an API provider
 Sender: MAIL_FROM ("E-Bike Doctor PRO <info@example.com>"), optional MAIL_REPLY_TO. Legacy SMTP_FROM is still accepted.
+Own-domain providers use RESEND_FROM / BREVO_FROM (e.g. "E-Bike Doctor PRO <licenc@mail.ebikedoctorpro.com>").
+FAILOVER (3.2.x): MAIL_PROVIDER = primary, MAIL_FALLBACK = comma list (e.g. "resend"). Without MAIL_PROVIDER the order is
+gmail -> resend -> brevo -> smtp among the configured ones, so Gmail stays primary and Resend is the alternative sender; when the
+primary fails (token revoked, quota, HTTP error) the same message is sent by the next provider, and the outbox shows which one.
 No paid service is created by this code. Without a provider the message is kept in a short server-side outbox (admin page)
 with licence keys and link tokens REDACTED, so nothing secret is ever logged.
 """
@@ -28,6 +32,7 @@ from email.utils import parseaddr
 logger = logging.getLogger("ebike-doctor.mail")
 RESEND_URL = "https://api.resend.com/emails"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+PROVIDERS = ("gmail", "resend", "brevo", "smtp")
 GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
 BREVO_URL = "https://api.brevo.com/v3/smtp/email"
 
@@ -44,28 +49,46 @@ class Mailer:
     def sender(self):
         return _env("MAIL_FROM") or _env("SMTP_FROM")
 
+    def sender_for(self, p):
+        """Resend/Brevo send from the own domain (RESEND_FROM / BREVO_FROM, e.g. "E-Bike Doctor PRO <licenc@mail.ebikedoctorpro.com>");
+        Gmail always sends as the authorised Gmail account (MAIL_FROM)."""
+        own = {"resend": "RESEND_FROM", "brevo": "BREVO_FROM"}.get(p)
+        s = (_env(own) if own else "") or self.sender
+        if p in ("resend", "brevo") and re.search(r"@(gmail|googlemail)\.com>?\s*$", s, re.I):
+            return ""                       # a domain provider cannot send as a gmail.com address
+        return s
+
+    @staticmethod
+    def _has_creds(p):
+        return {"resend": bool(_env("RESEND_API_KEY")), "brevo": bool(_env("BREVO_API_KEY")),
+                "gmail": all(_env(k) for k in ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN")),
+                "smtp": all(_env(k) for k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"))}.get(p, False)
+
+    def chain(self):
+        """Ordered providers: MAIL_PROVIDER (primary) then MAIL_FALLBACK (comma list). Without MAIL_PROVIDER the order is
+        gmail → resend → brevo → smtp, so adding a Resend key never silently replaces a working Gmail sender: Resend becomes the
+        fallback. Only providers with credentials AND a usable sender address are listed."""
+        primary = _env("MAIL_PROVIDER").lower()
+        fb = [x.strip().lower() for x in _env("MAIL_FALLBACK").split(",") if x.strip()]
+        head = [primary] if primary in PROVIDERS else []
+        order = head + (fb if fb else list(PROVIDERS))
+        out = []
+        for p in order:
+            if p in PROVIDERS and p not in out and self._has_creds(p) and "@" in self.sender_for(p):
+                out.append(p)
+        return out
+
     @property
     def provider(self):
+        c = self.chain()
+        if c:
+            return c[0]
         p = _env("MAIL_PROVIDER").lower()
-        if p in ("resend", "brevo", "smtp", "gmail"):
-            return p
-        if _env("RESEND_API_KEY"):
-            return "resend"
-        if _env("BREVO_API_KEY"):
-            return "brevo"
-        if _env("GMAIL_REFRESH_TOKEN"):
-            return "gmail"
-        if all(_env(k) for k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD")):
-            return "smtp"
-        return "none"
+        return p if p in PROVIDERS else "none"
 
     @property
     def configured(self):
-        p = self.provider
-        creds = {"resend": _env("RESEND_API_KEY"), "brevo": _env("BREVO_API_KEY"),
-                 "gmail": all(_env(k) for k in ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN")),
-                 "smtp": all(_env(k) for k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"))}.get(p)
-        return bool(creds) and "@" in self.sender
+        return bool(self.chain())
 
     # ------------------------------------------------------------------ transport
     def _http_post(self, url, headers, payload, form=False):
@@ -80,7 +103,7 @@ class Mailer:
             return e.code, e.read().decode("utf-8", "replace")[:500]
 
     def _send_resend(self, to, subject, text, html, headers):
-        payload = {"from": self.sender, "to": [to], "subject": subject, "text": text}
+        payload = {"from": self.sender_for("resend"), "to": [to], "subject": subject, "text": text}
         if html:
             payload["html"] = html
         if _env("MAIL_REPLY_TO"):
@@ -90,7 +113,7 @@ class Mailer:
         return self._http_post(RESEND_URL, {"Authorization": "Bearer " + _env("RESEND_API_KEY")}, payload)
 
     def _send_brevo(self, to, subject, text, html, headers):
-        name, addr = parseaddr(self.sender)
+        name, addr = parseaddr(self.sender_for("brevo"))
         payload = {"sender": {"email": addr, **({"name": name} if name else {})}, "to": [{"email": to}], "subject": subject,
                    "textContent": text}
         if html:
@@ -118,7 +141,7 @@ class Mailer:
 
     def _send_gmail(self, to, subject, text, html, headers):
         msg = EmailMessage()
-        msg["From"], msg["To"], msg["Subject"] = self.sender, to, subject
+        msg["From"], msg["To"], msg["Subject"] = self.sender_for("gmail"), to, subject
         if _env("MAIL_REPLY_TO"):
             msg["Reply-To"] = _env("MAIL_REPLY_TO")
         for k, v in (headers or {}).items():
@@ -148,17 +171,29 @@ class Mailer:
     # ------------------------------------------------------------------ public
     def send(self, to, subject, body, kind="info", html=None, headers=None):
         """Never raises (a mail problem must not break a webhook). Returns the outbox entry (sent True/False)."""
+        chain = self.chain()
         entry = {"t": int(time.time()), "to": _mask(to), "subject": subject[:160], "kind": kind, "sent": False, "provider": self.provider}
-        if self.configured and to and "@" in to:
-            try:
-                status, resp = getattr(self, "_send_" + self.provider)(to, subject, body, html, headers)
-                entry["sent"] = 200 <= status < 300
-                if not entry["sent"]:
-                    entry["error"] = f"HTTP {status}"
-                    logger.error("mail rejected kind=%s provider=%s status=%s detail=%s", kind, self.provider, status, _redact(resp)[:200])
-            except Exception as exc:   # never break the webhook because of mail
-                entry["error"] = str(exc)[:40] if isinstance(exc, RuntimeError) else type(exc).__name__
-                logger.error("mail failed kind=%s provider=%s error=%s", kind, self.provider, type(exc).__name__)
+        if chain and to and "@" in to:
+            failed = []
+            for i, p in enumerate(chain):       # primary first; on failure the next provider (e.g. Gmail -> Resend)
+                try:
+                    status, resp = getattr(self, "_send_" + p)(to, subject, body, html, headers)
+                    if 200 <= status < 300:
+                        entry.update(sent=True, provider=p)
+                        if i:
+                            entry["fallback_from"] = failed
+                            logger.warning("mail sent by FALLBACK provider=%s after %s kind=%s", p, failed, kind)
+                        entry.pop("error", None)
+                        break
+                    err = f"HTTP {status}"
+                    logger.error("mail rejected kind=%s provider=%s status=%s detail=%s", kind, p, status, _redact(resp)[:200])
+                except Exception as exc:   # never break the webhook because of mail
+                    err = str(exc)[:40] if isinstance(exc, RuntimeError) else type(exc).__name__
+                    logger.error("mail failed kind=%s provider=%s error=%s", kind, p, type(exc).__name__)
+                failed.append(f"{p}:{err}")
+                entry["error"] = err
+            if not entry["sent"] and len(chain) > 1:
+                entry["error"] = "; ".join(failed)[:120]
         else:
             entry["error"] = "not_configured"
             logger.warning("mail not sent (no mail provider configured) kind=%s to=%s", kind, _mask(to))

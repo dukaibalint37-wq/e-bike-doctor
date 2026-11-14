@@ -818,7 +818,7 @@ def admin_dashboard(mode: str = "live", x_admin_token: Optional[str] = Header(de
             "ai": {**QUOTA.usage(31), "access_mode": QUOTA.access_mode(), "ai_public": os.getenv("AI_PUBLIC", "0").strip() == "1",
                    "daily_limit_per_licence": QUOTA.daily_limit, "provider": provider_name()},
             "interest": interest_stats,
-            "config": {"shop_mode": SHOP.mode, "mail_provider": MAILER.provider, "mail_configured": MAILER.configured,
+            "config": {"shop_mode": SHOP.mode, "mail_provider": MAILER.provider, "mail_configured": MAILER.configured, "mail_chain": MAILER.chain(),
                        "download_bucket": s3presign.configured(), "lease_signing": LICENSES.lease.available,
                        "mail_health": mailer_mod.health(STORE),
                        "lemonsqueezy_map": bool(shop_mod.product_map()), "webhook_secret": bool(os.getenv("LEMONSQUEEZY_WEBHOOK_SECRET", "").strip()),

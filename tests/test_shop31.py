@@ -151,6 +151,66 @@ class PriceTest(Base):
                 self.assertNotIn("Ft", text); self.assertNotIn("HUF", text)
 
 
+class MailFailoverTest(Base):
+    """Gmail stays the primary sender; Resend (own domain ebikedoctorpro.com) is the alternative."""
+    def setUp(self):
+        super().setUp()
+        self._extra = {k: os.environ.get(k) for k in ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN", "RESEND_FROM", "MAIL_FALLBACK")}
+        os.environ.update({"GMAIL_CLIENT_ID": "cid", "GMAIL_CLIENT_SECRET": "csec", "GMAIL_REFRESH_TOKEN": "rt",
+                           "MAIL_FROM": "E-Bike Doctor PRO <owner@gmail.com>", "RESEND_FROM": "E-Bike Doctor PRO <licenc@mail.ebikedoctorpro.com>"})
+        M.Mailer._gmail_token = (None, 0.0)
+
+    def tearDown(self):
+        for k, v in self._extra.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        M.Mailer._gmail_token = (None, 0.0)
+        super().tearDown()
+
+    def _mailer(self, gmail_ok=True, resend_status=200):
+        calls = []
+
+        class FM(M.Mailer):
+            def _http_post(self, url, headers, payload, form=False):
+                calls.append(url)
+                if url == M.GOOGLE_TOKEN_URL:
+                    return (200, '{"access_token":"at","expires_in":3600}') if gmail_ok else (400, '{"error":"invalid_grant"}')
+                if url == M.GMAIL_SEND_URL:
+                    return 200, '{"id":"g1"}'
+                if url == M.RESEND_URL:
+                    calls.append(payload)
+                    return resend_status, '{"id":"r1"}'
+                return 500, ""
+        return FM(self.store), calls
+
+    def test_adding_a_resend_key_keeps_gmail_primary(self):
+        m, calls = self._mailer()
+        self.assertEqual(m.chain(), ["gmail", "resend"])
+        e = m.send("buyer@example.com", "s", "body", kind="purchase", html="<p>x</p>")
+        self.assertTrue(e["sent"]); self.assertEqual(e["provider"], "gmail"); self.assertNotIn(M.RESEND_URL, calls)
+
+    def test_gmail_failure_falls_back_to_resend_with_the_own_domain_sender(self):
+        m, calls = self._mailer(gmail_ok=False)
+        e = m.send("buyer@example.com", "s", "body EBDW-AAAAA-BBBBB-CCCCC-DDDDD", kind="purchase", html="<p>x</p>")
+        self.assertTrue(e["sent"]); self.assertEqual(e["provider"], "resend"); self.assertEqual(e["fallback_from"], ["gmail:gmail_token_revoked"])
+        payload = [c for c in calls if isinstance(c, dict)][0]
+        self.assertEqual(payload["from"], "E-Bike Doctor PRO <licenc@mail.ebikedoctorpro.com>")
+        self.assertEqual(self.store.get("mail:health")["provider"], "resend")
+        self.assertNotIn("AAAAA", json.dumps(self.store.get("mail:outbox")))
+
+    def test_both_failing_is_reported_and_never_raises(self):
+        m, _ = self._mailer(gmail_ok=False, resend_status=422)
+        e = m.send("buyer@example.com", "s", "body", kind="purchase")
+        self.assertFalse(e["sent"]); self.assertIn("gmail:gmail_token_revoked", e["error"]); self.assertIn("resend:HTTP 422", e["error"])
+
+    def test_resend_cannot_send_as_gmail_and_explicit_order_is_respected(self):
+        os.environ.pop("RESEND_FROM")
+        m, _ = self._mailer()
+        self.assertEqual(m.chain(), ["gmail"])                         # MAIL_FROM is a gmail.com address -> Resend not usable
+        os.environ.update({"RESEND_FROM": "licenc@mail.ebikedoctorpro.com", "MAIL_PROVIDER": "resend", "MAIL_FALLBACK": "gmail"})
+        self.assertEqual(m.chain(), ["resend", "gmail"])
+        os.environ.pop("MAIL_PROVIDER"); os.environ.pop("MAIL_FALLBACK")
+
+
 class OfficialSiteLinkTest(Base):
     """2026-11-14: every customer e-mail points to the official domain (language-specific pages)."""
     def test_mails_link_the_official_domain_in_every_language(self):

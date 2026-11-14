@@ -249,7 +249,7 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:24px}
     var c = d.config, yes = function (b, t, f) { return el('span', { cls: b ? 'ok' : 'warn', text: b ? (t || 'kész') : (f || 'hiányzik') }); };
     put('sysConfig', table([['Elem', function (r) { return r[0]; }], ['Állapot', function (r) { return r[1]; }, 'wrap']], [
       ['Webáruház üzemmód', el('span', { cls: c.shop_mode === 'live' ? 'ok' : 'warn', text: c.shop_mode === 'live' ? 'ÉLES' : 'TESZT' })], ['Lemon Squeezy termékek', yes(c.lemonsqueezy_map)], ['Webhook-titok', yes(c.webhook_secret)],
-      ['E-mail-küldés', yes(c.mail_configured, c.mail_provider)],
+      ['E-mail-küldés', yes(c.mail_configured, (c.mail_chain && c.mail_chain.length ? c.mail_chain[0] + (c.mail_chain.length > 1 ? ' (tartalék: ' + c.mail_chain.slice(1).join(', ') + ')' : ' (nincs tartalék)') : c.mail_provider))],
       ['Utolsó levélküldés', c.mail_health && c.mail_health.t ? el('span', { cls: c.mail_health.ok ? 'ok' : 'bad', text: (c.mail_health.ok ? 'sikeres' : 'HIBA: ' + c.mail_health.error) + ' · ' + fmtTs(c.mail_health.t) }) : el('span', { cls: 'muted', text: 'még nem volt' })], ['Védett letöltési tárhely (R2)', yes(c.download_bucket)], ['Licencaláírás', yes(c.lease_signing)],
       ['Kétlépcsős admin-belépés', yes(c.admin_2fa)], ['Fejléc-token (automatizálás)', el('span', { cls: c.header_token_enabled ? 'warn' : 'ok', text: c.header_token_enabled ? 'engedélyezve' : 'tiltva (csak 2FA)' })],
       ['Weboldal-eredet (CORS)', el('span', { text: c.cors_origins.join(', ') || '–' })], ['Tároló', el('span', { text: c.store })]]));
