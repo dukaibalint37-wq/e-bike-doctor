@@ -34,8 +34,11 @@ def new_vars():
     p = r"C:\EBD_SIGNING\admin-2fa-production\interest-secret.txt"
     if not os.path.exists(p):
         open(p, "w").write(secrets.token_hex(32))
-    return {**adm, "INTEREST_SECRET": open(p).read().strip(), "CORS_ORIGINS": "https://e-bike-doctor-pro-website.pages.dev",
-            "SITE_URL": "https://e-bike-doctor-pro-website.pages.dev", "SITE_HOST": "e-bike-doctor-pro-website.pages.dev", "ADMIN_HEADER_TOKEN": "1"}
+    # official domain since 2026-11-14; the old pages.dev origin stays allowed during the move (old links, redirect not yet active)
+    return {**adm, "INTEREST_SECRET": open(p).read().strip(),
+            "CORS_ORIGINS": "https://ebikedoctorpro.com,https://www.ebikedoctorpro.com,https://e-bike-doctor-pro-website.pages.dev",
+            "SITE_URL": "https://ebikedoctorpro.com", "SITE_HOST": "ebikedoctorpro.com,www.ebikedoctorpro.com,e-bike-doctor-pro-website.pages.dev",
+            "ADMIN_HEADER_TOKEN": "1"}
 
 
 def git(*a):

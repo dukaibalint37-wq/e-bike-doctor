@@ -151,6 +151,28 @@ class PriceTest(Base):
                 self.assertNotIn("Ft", text); self.assertNotIn("HUF", text)
 
 
+class OfficialSiteLinkTest(Base):
+    """2026-11-14: every customer e-mail points to the official domain (language-specific pages)."""
+    def test_mails_link_the_official_domain_in_every_language(self):
+        os.environ.pop("SITE_URL", None)
+        dl = {"hu": "https://ebikedoctorpro.com/hu/letoltesek/", "de": "https://ebikedoctorpro.com/de/downloads/", "en": "https://ebikedoctorpro.com/en/downloads/"}
+        for lang in ("hu", "de", "en"):
+            home = f"https://ebikedoctorpro.com/{lang}/"
+            for subj, text, html in (MT.purchase("EBD-WIN", lang, "", "EBDW-AAAAA-BBBBB-CCCCC-DDDDD", "https://api.example/dl", False),
+                                     MT.resend(lang, []), MT.refund("EBD-AND", lang, "1", "ABCD", False),
+                                     MT.confirm(lang, "https://api.example/c", "https://api.example/u")):
+                self.assertIn(home, text); self.assertIn(home, html); self.assertNotIn("pages.dev", text + html)
+            _, text, html = MT.purchase("EBD-AND", lang, "", "EBDA-AAAAA-BBBBB-CCCCC-DDDDD", "https://api.example/dl", False)
+            self.assertIn(dl[lang], text); self.assertIn(dl[lang], html)
+
+    def test_site_url_env_overrides_for_staging(self):
+        os.environ["SITE_URL"] = "https://preview.example/"
+        try:
+            self.assertEqual(MT.site_url("de", "downloads"), "https://preview.example/de/downloads/")
+        finally:
+            os.environ.pop("SITE_URL", None)
+
+
 class RefundTest(Base):
     def _buy(self, oid, lang, variant="111"):
         raw = ls_event(order_id=oid, lang=lang, variant=variant)

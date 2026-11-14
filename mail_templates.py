@@ -18,6 +18,16 @@ def support():
     return os.getenv("SUPPORT_EMAIL", "").strip()
 
 
+OFFICIAL_SITE = "https://ebikedoctorpro.com"          # official domain since 2026-11-14 (SITE_URL overrides, e.g. for tests)
+SITE_PAGES = {"home": {"hu": "/hu/", "de": "/de/", "en": "/en/"},
+              "downloads": {"hu": "/hu/letoltesek/", "de": "/de/downloads/", "en": "/en/downloads/"}}
+
+
+def site_url(lang, page="home"):
+    base = (os.getenv("SITE_URL", "").strip() or OFFICIAL_SITE).rstrip("/")
+    return base + SITE_PAGES[page][lang_of(lang)]
+
+
 T = {
     "hu": {
         "subj_purchase": "{name} – licenckulcs és letöltés",
@@ -28,7 +38,8 @@ T = {
         "key": "Licenckulcs",
         "dl": "Letöltés (a link 48 óráig érvényes)",
         "dl_btn": "Letöltés",
-        "dl_again": "Lejárt link helyett újat kérhetsz a weboldal Letöltések oldalán a licenckulccsal.",
+        "dl_again": "Lejárt link helyett újat kérhetsz a licenckulccsal a weboldal Letöltések oldalán: {url}",
+        "web": "Weboldal: {u}",
         "steps_title": "Aktiválás",
         "steps_EBD-WIN": ["Töltsd le és futtasd a telepítőt. Ha a Windows SmartScreen „ismeretlen közzétevő” figyelmeztetést mutat: További információ → Futtatás mindenképp.",
                           "Indítsd el az E-Bike Doctor PRO programot, majd: Licenc és vásárlás → Aktiválás.",
@@ -64,7 +75,8 @@ T = {
         "key": "Lizenzschlüssel",
         "dl": "Download (Link 48 Stunden gültig)",
         "dl_btn": "Herunterladen",
-        "dl_again": "Einen neuen Link erhalten Sie jederzeit auf der Download-Seite der Website mit Ihrem Lizenzschlüssel.",
+        "dl_again": "Einen neuen Link erhalten Sie jederzeit mit Ihrem Lizenzschlüssel auf der Download-Seite der Website: {url}",
+        "web": "Website: {u}",
         "steps_title": "Aktivierung",
         "steps_EBD-WIN": ["Installationsprogramm herunterladen und starten. Zeigt Windows SmartScreen „Unbekannter Herausgeber“: Weitere Informationen → Trotzdem ausführen.",
                           "E-Bike Doctor PRO starten, dann: Lizenz & Kauf → Aktivieren.",
@@ -100,7 +112,8 @@ T = {
         "key": "Licence key",
         "dl": "Download (link valid for 48 hours)",
         "dl_btn": "Download",
-        "dl_again": "If the link has expired, get a new one on the website's Downloads page with your licence key.",
+        "dl_again": "If the link has expired, get a new one with your licence key on the website's Downloads page: {url}",
+        "web": "Website: {u}",
         "steps_title": "Activation",
         "steps_EBD-WIN": ["Download and run the installer. If Windows SmartScreen shows “unknown publisher”: More info → Run anyway.",
                           "Start E-Bike Doctor PRO, then: Licence & purchase → Activate.",
@@ -141,7 +154,7 @@ def _wrap(lang, inner):
 
 def _footer(t, lang):
     s = support()
-    return [t["support"].format(s=s)] if s else []
+    return [t["web"].format(u=site_url(lang))] + ([t["support"].format(s=s)] if s else [])
 
 
 def purchase(product, lang, name, key, link, test):
@@ -150,7 +163,7 @@ def purchase(product, lang, name, key, link, test):
     n = f", {name}" if name else ""
     steps = t["steps_" + product]
     text = ([t["test"], ""] if test else []) + [pname, "", t["hello"].format(n=n), "", f"{t['key']}: {key}", "",
-                                               f"{t['dl']}:", link, t["dl_again"], "", t["steps_title"] + ":"]
+                                               f"{t['dl']}:", link, t["dl_again"].format(url=site_url(lang, "downloads")), "", t["steps_title"] + ":"]
     text += [f"{i}. {s}" for i, s in enumerate(steps, 1)] + ["", t["device"], t["ai"], "", t["keep"],
                                                               t["price"].format(price=PRICE[product][lang])] + _footer(t, lang)
     e = _h.escape
@@ -159,7 +172,7 @@ def purchase(product, lang, name, key, link, test):
         f'<p style="margin:0 0 4px;font-size:13px;color:#4b5b66">{e(t["key"])}</p>' \
         f'<p style="font-family:Consolas,monospace;font-size:18px;font-weight:700;background:#ecfeff;border:1px solid #a5f3fc;padding:12px;border-radius:8px;' \
         f'letter-spacing:.5px">{e(key)}</p>' \
-        f'<p><a href="{e(link)}" style="{CSS_BTN}">{e(t["dl_btn"])}</a></p><p style="font-size:13px;color:#4b5b66">{e(t["dl"])}. {e(t["dl_again"])}</p>' \
+        f'<p><a href="{e(link)}" style="{CSS_BTN}">{e(t["dl_btn"])}</a></p><p style="font-size:13px;color:#4b5b66">{e(t["dl"])}. {e(t["dl_again"].format(url=site_url(lang, "downloads")))}</p>' \
         f'<h3 style="margin:18px 0 6px">{e(t["steps_title"])}</h3><ol style="padding-left:20px;margin:0">' + \
         "".join(f"<li>{e(s)}</li>" for s in steps) + "</ol>" + \
         f'<p style="font-size:13px;color:#4b5b66">{e(t["device"])}<br>{e(t["ai"])}</p><p><b>{e(t["keep"])}</b></p>' \
