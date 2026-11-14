@@ -80,7 +80,7 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:24px}
    <div class="box"><h2>Legutóbbi vásárlások</h2><div id="ovOrders"></div></div>
   </section>
   <section data-panel="revenue" class="hidden">
-   <div class="box"><h2>Havi eladások és bevétel</h2><div id="revMonths"></div><p class="muted" style="font-size:12.5px">A bevétel a Lemon Squeezy által jelentett bruttó összeg (adóval, a Lemon Squeezy díja előtt). A kifizetés USD-ben történik; a pontos elszámolás a Lemon Squeezy felületén látható.</p></div>
+   <div class="box"><h2>Havi eladások és bevétel</h2><div id="revMonths"></div><p class="muted" style="font-size:12.5px">A bruttó bevétel a Lemon Squeezy által jelentett összeg (adóval). Az adót (ÁFA) a Lemon Squeezy mint viszonteladó (Merchant of Record) szedi be és fizeti be. A Lemon Squeezy díját a rendelési adat nem tartalmazza: a „becsült” díj 5% + 1,5% (nem USA-beli vevő) + 0,50 USD feltételezéssel számolt tájékoztató érték. A kifizetés USD-ben történik; a pontos díj és elszámolás a Lemon Squeezy felületén látható.</p></div>
    <div class="box"><h2>Vásárlások</h2><div id="revOrders"></div></div>
   </section>
   <section data-panel="licences" class="hidden">
@@ -187,8 +187,16 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:24px}
       (mh.error === 'gmail_token_revoked' ? 'A Gmail-engedély lejárt vagy visszavonták – futtasd újra a tools/gmail_oauth_setup.py-t.' : 'Nézd meg a Rendszer fület.');
     var months = d.shop.months, cur = months[0] || {}, key = mode;
     var sales = function (m) { return (m['EBD-WIN:' + key] || 0) + (m['EBD-AND:' + key] || 0); };
-    var rev = function (m, c) { return m[(mode === 'live' ? 'revenue_' : 'test_revenue_') + c] || 0; };
-    var revStr = function (m) { var p = ['EUR', 'HUF', 'USD'].filter(function (c) { return rev(m, c); }).map(function (c) { return money(rev(m, c), c); }); return p.length ? p.join(' + ') : '0'; };
+    var amt = function (m, kind, c) { return m[(mode === 'live' ? '' : 'test_') + kind + '_' + c] || 0; };
+    var rev = function (m, c) { return amt(m, 'revenue', c); };
+    var sumStr = function (m, kind) { var p = ['EUR', 'HUF', 'USD'].filter(function (c) { return amt(m, kind, c); }).map(function (c) { return money(amt(m, kind, c), c); }); return p.length ? p.join(' + ') : '0'; };
+    var revStr = function (m) { return sumStr(m, 'revenue'); };
+    var netStr = function (m) {           // gross - VAT - refunded (still before the Lemon Squeezy fee)
+      var p = ['EUR', 'HUF', 'USD'].filter(function (c) { return rev(m, c); }).map(function (c) { return money(rev(m, c) - amt(m, 'tax', c) - amt(m, 'refunded', c), c); });
+      return p.length ? p.join(' + ') : '0'; };
+    // Lemon Squeezy does not send its fee in the order data: ESTIMATE = 5% + 1.5% (non-US buyer) + 0.50 USD per order
+    var feeEst = function (o) { return o.total_usd ? Math.round(o.total_usd * 0.065 + 50) / 100 : null; };
+    var cents = function (v, c) { return v == null ? '' : money(v / 100, c || ''); };
     var lic = d.licenses, actv = lic['EBD-WIN'].active + lic['EBD-AND'].active;
     var dl30 = d.downloads_daily.reduce(function (a, r) { return a + (r['EBD-WIN:' + key] || 0) + (r['EBD-AND:' + key] || 0); }, 0);
     kpis('kpis', [[revStr(cur), 'Bevétel – ' + (cur.month ? cur.month.slice(0, 4) + '-' + cur.month.slice(4) : ''), mode === 'test' ? 'tesztvásárlások' : 'bruttó, Lemon Squeezy szerint'],
@@ -205,9 +213,18 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:24px}
       ['Összeg', function (o) { return money((o.total || 0) / 100, o.currency || ''); }, 'num'], ['Vevő', function (o) { return o.email; }], ['Licenc', function (o) { return o.lid; }], ['Nyelv', function (o) { return o.lang; }],
       ['Levél', function (o) { return el('span', { cls: o.mail_sent ? 'ok' : 'bad', text: o.mail_sent ? 'elküldve' : 'NEM ment ki' }); }], ['Állapot', function (o) { return el('span', { cls: o.refunded ? 'warn' : 'ok', text: o.refunded ? 'visszatérítve' : 'fizetve' }); }]];
     put('ovOrders', table(ocols, d.orders.slice(0, 8), 'Még nincs vásárlás.'));
-    put('revOrders', table(ocols, d.orders, 'Még nincs vásárlás.'));
+    var rcols = ocols.slice(0, 3).concat([
+      ['Nettó', function (o) { return o.subtotal != null ? cents(o.subtotal, o.currency) : ''; }, 'num'],
+      ['Adó', function (o) { return o.tax != null ? cents(o.tax, o.currency) + (o.tax_name ? ' (' + o.tax_name + ' ' + (o.tax_rate || 0) + '%)' : '') : ''; }, 'num'],
+      ['Kedvezmény', function (o) { return o.discount ? cents(o.discount, o.currency) : ''; }, 'num'],
+      ['Bruttó', function (o) { return cents(o.total || 0, o.currency); }, 'num'],
+      ['LS-díj (becsült)', function (o) { var f = feeEst(o); return f == null ? '' : '≈ ' + money(f, 'USD'); }, 'num'],
+      ['Visszatérítve', function (o) { return o.refunded_cents ? cents(o.refunded_cents, o.currency) : ''; }, 'num']], ocols.slice(4));
+    put('revOrders', table(rcols, d.orders, 'Még nincs vásárlás.'));
     put('revMonths', table([['Hónap', function (m) { return m.month.slice(0, 4) + '-' + m.month.slice(4); }], ['Windows', function (m) { return m['EBD-WIN:' + key]; }, 'num'], ['Android', function (m) { return m['EBD-AND:' + key]; }, 'num'],
-      ['Bevétel', function (m) { return revStr(m); }, 'num'], ['Visszatérítés', function (m) { return mode === 'live' ? m.refunds : m.refunds_test; }, 'num']], months));
+      ['Bruttó bevétel', function (m) { return revStr(m); }, 'num'], ['ebből adó (az LS fizeti be)', function (m) { return sumStr(m, 'tax'); }, 'num'],
+      ['Visszatérítve', function (m) { return sumStr(m, 'refunded'); }, 'num'], ['Nettó (LS-díj előtt)', function (m) { return netStr(m); }, 'num'],
+      ['Visszatérítés (db)', function (m) { return mode === 'live' ? m.refunds : m.refunds_test; }, 'num']], months));
     kpis('licKpis', ['EBD-WIN', 'EBD-AND'].map(function (p) { var s = lic[p]; return [s.active + ' / ' + s.total, PNAME(p) + ' – aktív / összes', 'visszavont ' + s.revoked + ' · tulajdonosi ' + s.owner + ' · eszközön ' + s.activated_devices + (s.purged ? ' · leválasztott teszt ' + s.purged : '')]; }));
     var dd = d.downloads_daily.slice().reverse();
     kpis('dlKpis', [[String(d.shop.downloads['EBD-WIN'] || 0), 'Windows letöltés összesen', 'éles + teszt, induláskor nullázható'], [String(d.shop.downloads['EBD-AND'] || 0), 'Android letöltés összesen', 'éles + teszt'], [String(dl30), 'Letöltés 30 nap (' + (mode === 'live' ? 'éles' : 'teszt') + ')']]);

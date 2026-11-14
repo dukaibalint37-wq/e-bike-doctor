@@ -188,6 +188,40 @@ class RefundTest(Base):
         self.assertEqual(len(self.mail.calls), n + 1)                                             # exactly one notice
 
 
+class OrderMoneyTest(Base):
+    """3.2.x: the admin shows net / VAT / gross / refunded amounts exactly as Lemon Squeezy reports them."""
+    def _event(self, name, oid, status, **amounts):
+        ev = json.loads(ls_event(name, order_id=oid, status=status, lang="de"))
+        ev["data"]["attributes"].update(amounts)
+        raw = json.dumps(ev).encode()
+        return self.shop.handle_webhook(raw, sign(raw))
+
+    def test_tax_and_refund_amounts_are_recorded_per_order_and_per_month(self):
+        self._event("order_created", "91", "paid", subtotal=1680, tax=319, total=1999, tax_name="VAT", tax_rate="19.00",
+                    tax_inclusive=True, discount_total=0, total_usd=2310, tax_usd=369)
+        o = self.shop.orders()[0]
+        self.assertEqual((o["subtotal"], o["tax"], o["total"], o["tax_name"], o["tax_rate"], o["tax_inclusive"], o["total_usd"]),
+                         (1680, 319, 1999, "VAT", 19.0, True, 2310))
+        m = self.shop.stats()["months"][0]
+        self.assertEqual((m["test_revenue_EUR"], m["test_tax_EUR"]), (19.99, 3.19))
+        self.assertNotIn("revenue_EUR", m)                                                         # nothing leaks into the live figures
+        self._event("order_refunded", "91", "partial_refund", refunded_amount=500)
+        self._event("order_refunded", "91", "refunded", refunded_amount=1999)                     # cumulative in LS
+        self._event("order_refunded", "91", "refunded", refunded_amount=1999)                     # retry: ignored
+        o = self.shop.orders()[0]
+        self.assertEqual((o["refunded_cents"], o["partial_refund_cents"], o["refunded"]), (1999, 500, True))
+        self.assertEqual(self.shop.stats()["months"][0]["test_refunded_EUR"], 19.99)              # 5.00 + 14.99, never double counted
+        self.shop.purge_test_data()
+        m = self.shop.stats()["months"][0]
+        self.assertEqual([k for k in m if k.startswith("test_") and m[k]], [])
+
+    def test_missing_or_odd_amounts_never_break_the_webhook(self):
+        r = self._event("order_created", "92", "paid", tax=None, tax_rate="n/a", subtotal="x")
+        self.assertEqual(len(r["licences"]), 1)
+        o = self.shop.orders()[0]
+        self.assertEqual((o["tax"], o["tax_rate"], o["subtotal"], o["total"]), (0, 0.0, 0, 1999))
+
+
 class DownloadTest(Base):
     def test_sigv4_matches_the_aws_reference_vector(self):
         u = s3presign.presign_get("examplebucket.s3.amazonaws.com", "/test.txt", "AKIAIOSFODNN7EXAMPLE",

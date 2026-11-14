@@ -41,6 +41,27 @@ def verify_signature(raw: bytes, signature: str, secret: str) -> bool:
     return hmac.compare_digest(expected, signature.strip().lower())
 
 
+def _cents(v):
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def order_money(attrs):
+    """Amounts of a Lemon Squeezy order (integer cents, as LS sends them). Lemon Squeezy is the Merchant of Record:
+    it collects and remits the VAT; its own fee is not part of the order object (only on the LS payout pages)."""
+    rate = attrs.get("tax_rate", 0)
+    try:
+        rate = float(rate or 0)
+    except (TypeError, ValueError):
+        rate = 0.0
+    return {"total": _cents(attrs.get("total")), "subtotal": _cents(attrs.get("subtotal")), "tax": _cents(attrs.get("tax")),
+            "discount": _cents(attrs.get("discount_total")), "currency": str(attrs.get("currency", "") or "")[:3],
+            "tax_name": str(attrs.get("tax_name", "") or "")[:40], "tax_rate": rate, "tax_inclusive": bool(attrs.get("tax_inclusive")),
+            "total_usd": _cents(attrs.get("total_usd")), "tax_usd": _cents(attrs.get("tax_usd"))}
+
+
 def product_map():
     try:
         m = json.loads(os.getenv("LS_PRODUCT_MAP", "{}") or "{}")
@@ -112,20 +133,23 @@ class Shop:
             logger.error("order %s: unknown product/variant – check LS_PRODUCT_MAP", order_id)
             return {"ok": True, "ignored": "unknown product"}
         email, name = attrs.get("user_email", ""), attrs.get("user_name", "")
+        money = order_money(attrs)
         issued = []
         for prod in products:
             key, rec = self.licenses.create(prod, email=email, name=name, test=test_mode, source="lemonsqueezy", order_id=order_id)
             if key is None:          # already issued for this order (retry)
                 continue
             month = time.strftime("%Y%m", time.gmtime(self.clock()))
-            self.store.incr(f"shop:sales:{month}:{prod}:{'test' if test_mode else 'live'}", 800 * 86_400)
-            self.store.incr(f"shop:revenue_cents:{month}:{attrs.get('currency', 'EUR')}:{'test' if test_mode else 'live'}", 800 * 86_400, int(attrs.get("total", 0) or 0))
+            md = "test" if test_mode else "live"
+            self.store.incr(f"shop:sales:{month}:{prod}:{md}", 800 * 86_400)
+            self.store.incr(f"shop:revenue_cents:{month}:{money['currency'] or 'EUR'}:{md}", 800 * 86_400, money["total"])
+            if money["tax"]:
+                self.store.incr(f"shop:tax_cents:{month}:{money['currency'] or 'EUR'}:{md}", 800 * 86_400, money["tax"])
             link = self.download_link(rec["lid"], prod)
             subject, text, html = mail_templates.purchase(prod, lang, name, key, link, test_mode)
             sent = self.mailer.send(email, subject, text, kind="purchase", html=html)
             issued.append(rec["lid"])
-            self._log_order({"t": int(self.clock()), "order": order_id, "product": prod, "mode": "test" if test_mode else "live",
-                             "total": int(attrs.get("total", 0) or 0), "currency": attrs.get("currency", ""), "lid": rec["lid"],
+            self._log_order({"t": int(self.clock()), "order": order_id, "product": prod, "mode": md, **money, "lid": rec["lid"],
                              "email": rec.get("email_masked", ""), "lang": lang, "mail_sent": bool(sent.get("sent")), "refunded": False})
             if not sent.get("sent"):
                 logger.error("order %s: licence %s created but the e-mail was not sent (%s) - buyer can use the re-send form",
@@ -135,11 +159,22 @@ class Shop:
     def _order_refunded(self, order_id, attrs, test_mode=False):
         orders = self.store.get("shop:orders") or []
         orders = orders if isinstance(orders, list) else []
+        month = time.strftime("%Y%m", time.gmtime(self.clock()))
+        # refunded_amount is cumulative in Lemon Squeezy: count only the part not yet recorded for this order
+        refunded = _cents(attrs.get("refunded_amount"))
+        mine = [o for o in orders if o.get("order") == order_id]
+        before = max([_cents(o.get("refunded_cents")) for o in mine] + [0])
+        delta = refunded - before if refunded > before else 0
+        cur = (mine[0].get("currency") if mine else "") or str(attrs.get("currency", "") or "EUR")[:3]
+        md = (mine[0].get("mode") if mine else "") or ("test" if test_mode else "live")
+        if delta:
+            self.store.incr(f"shop:refunded_cents:{month}:{cur}:{md}", 800 * 86_400, delta)
+        for o in mine:
+            o["refunded_cents"] = max(before, refunded)
         if attrs.get("status") == "partial_refund":
             # partial refund (e.g. goodwill discount): the buyer keeps the licence; only recorded
-            for o in orders:
-                if o.get("order") == order_id:
-                    o["partial_refund_cents"] = int(attrs.get("refunded_amount", 0) or 0)
+            for o in mine:
+                o["partial_refund_cents"] = refunded
             self.store.set("shop:orders", orders, 800 * 86_400)
             return {"ok": True, "partial_refund": True, "revoked": []}
         revoked = []
@@ -148,7 +183,6 @@ class Shop:
             if lid and self.licenses.get(lid).get("status") == "active":
                 self.licenses.revoke(lid, reason="refund " + order_id)
                 revoked.append((lid, prod))
-        month = time.strftime("%Y%m", time.gmtime(self.clock()))
         mode = "test" if test_mode or any(self.licenses.get(l).get("test") for l, _ in revoked) else "live"
         self.store.incr(f"shop:refunds:{month}" + (":test" if mode == "test" else ""), 800 * 86_400)
         lang = ""
@@ -273,7 +307,8 @@ class Shop:
             for p in PRODUCTS:
                 self.store.set(f"shop:sales:{key}:{p}:test", 0, 60)
             for cur in ("EUR", "HUF", "USD"):
-                self.store.set(f"shop:revenue_cents:{key}:{cur}:test", 0, 60)
+                for kind in ("revenue", "tax", "refunded"):
+                    self.store.set(f"shop:{kind}_cents:{key}:{cur}:test", 0, 60)
             self.store.set(f"shop:refunds:{key}:test", 0, 60)
             m -= 1
             if m == 0:
@@ -292,15 +327,16 @@ class Shop:
                 y, m = y - 1, 12
         fields = [(f"{p}:{mode}", f"shop:sales:{{k}}:{p}:{mode}") for p in PRODUCTS for mode in ("live", "test")]
         fields += [("refunds", "shop:refunds:{k}"), ("refunds_test", "shop:refunds:{k}:test")]
-        fields += [(("revenue_" if mode == "live" else "test_revenue_") + cur, f"shop:revenue_cents:{{k}}:{cur}:{mode}")
-                   for cur in ("EUR", "HUF", "USD") for mode in ("live", "test")]
+        money_kinds = ("revenue", "tax", "refunded")
+        fields += [(("" if mode == "live" else "test_") + kind + "_" + cur, f"shop:{kind}_cents:{{k}}:{cur}:{mode}")
+                   for kind in money_kinds for cur in ("EUR", "HUF", "USD") for mode in ("live", "test")]
         vals = mget(self.store, [tpl.format(k=k) for k in mlist for _, tpl in fields])
         out = []
         for i, k in enumerate(mlist):
             row = {"month": k}
             for j, (name, _) in enumerate(fields):
                 v = int(vals[i * len(fields) + j] or 0)
-                if name.startswith(("revenue_", "test_revenue_")):
+                if name.split("_")[0] in money_kinds or name.startswith(tuple("test_" + m for m in money_kinds)):
                     if v:
                         row[name] = v / 100
                 else:
