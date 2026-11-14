@@ -235,7 +235,7 @@ class Mailer:
         failover without touching real credentials. Ignored when SHOP_MODE=live."""
         if _env("SHOP_MODE").lower() == "live":
             return set()
-        return {x.strip().lower() for x in (_env("MAIL_SIMULATE_FAILURE").split(",") + list(extra or [])) if x.strip()}
+        return {x.strip().lower() for x in (_env("MAIL_SIMULATE_FAILURE").split(",") + list(extra or [])) if x.strip().lower() in PROVIDERS}   # "off" = none
 
     def send(self, to, subject, body, kind="info", html=None, headers=None, idempotency_key=None, simulate_fail=None):
         """Never raises (a mail problem must not break a webhook). Returns the outbox entry.
