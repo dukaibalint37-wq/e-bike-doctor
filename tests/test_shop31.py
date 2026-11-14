@@ -215,6 +215,12 @@ class OrderMoneyTest(Base):
         m = self.shop.stats()["months"][0]
         self.assertEqual([k for k in m if k.startswith("test_") and m[k]], [])
 
+    def test_full_refund_counts_the_order_total_even_if_ls_reports_a_rounded_amount(self):
+        self._event("order_created", "93", "paid", subtotal=1999, tax=0, total=1999)
+        self._event("order_refunded", "93", "refunded", refunded_amount=2000)                     # seen in the real LS test
+        self.assertEqual(self.shop.orders()[0]["refunded_cents"], 1999)
+        self.assertEqual(self.shop.stats()["months"][0]["test_refunded_EUR"], 19.99)
+
     def test_missing_or_odd_amounts_never_break_the_webhook(self):
         r = self._event("order_created", "92", "paid", tax=None, tax_rate="n/a", subtotal="x")
         self.assertEqual(len(r["licences"]), 1)

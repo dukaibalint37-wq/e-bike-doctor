@@ -163,6 +163,11 @@ class Shop:
         # refunded_amount is cumulative in Lemon Squeezy: count only the part not yet recorded for this order
         refunded = _cents(attrs.get("refunded_amount"))
         mine = [o for o in orders if o.get("order") == order_id]
+        # LS test 2026-11-14: a full refund of a 19.99 EUR order reported refunded_amount=2000 (formatted "€19.99", the
+        # USD round trip rounds). A full refund is the order total; a refund never exceeds the order total.
+        total = _cents(mine[0].get("total")) if mine else _cents(attrs.get("total"))
+        if total and (attrs.get("status") == "refunded" or refunded > total):
+            refunded = total
         before = max([_cents(o.get("refunded_cents")) for o in mine] + [0])
         delta = refunded - before if refunded > before else 0
         cur = (mine[0].get("currency") if mine else "") or str(attrs.get("currency", "") or "EUR")[:3]
