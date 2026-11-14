@@ -211,6 +211,144 @@ class MailFailoverTest(Base):
         os.environ.pop("MAIL_PROVIDER"); os.environ.pop("MAIL_FALLBACK")
 
 
+class MailSafetyTest(Base):
+    """No duplicate licence mail, no automatic resend on uncertain delivery, free-plan quota guard + safe queue, admin stats."""
+    def setUp(self):
+        super().setUp()
+        self._extra = {k: os.environ.get(k) for k in ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN", "RESEND_FROM",
+                                                      "MAIL_FALLBACK", "MAIL_SIMULATE_FAILURE", "RESEND_DAILY_LIMIT")}
+        os.environ.update({"GMAIL_CLIENT_ID": "cid", "GMAIL_CLIENT_SECRET": "csec", "GMAIL_REFRESH_TOKEN": "rt",
+                           "MAIL_FROM": "E-Bike Doctor PRO <owner@gmail.com>", "RESEND_FROM": "E-Bike Doctor PRO <licenc@mail.ebikedoctorpro.com>"})
+        M.Mailer._gmail_token = (None, 0.0)
+        self.beh = {"gmail": "ok", "resend": "ok"}
+        self.calls = []
+        test = self
+
+        class FM(M.Mailer):
+            def _http_post(self, url, headers, payload, form=False):
+                if url == M.GOOGLE_TOKEN_URL:
+                    return (200, '{"access_token":"at","expires_in":3600}') if test.beh["gmail"] != "token" else (400, '{"error":"invalid_grant"}')
+                p = "gmail" if url == M.GMAIL_SEND_URL else "resend"
+                test.calls.append((p, dict(headers), payload))
+                b = test.beh[p]
+                if b == "timeout":
+                    raise TimeoutError("timed out")
+                if b == "500":
+                    return 500, "{}"
+                if b == "500once":
+                    test.beh[p] = "ok"; return 500, "{}"
+                if b == "422":
+                    return 422, "{}"
+                return 200, '{"id":"x"}'
+        self.mail = FM(self.store)
+        self.shop = S.Shop(self.store, self.lic, self.mail, clock=self.clock)
+
+    def tearDown(self):
+        for k, v in self._extra.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        M.Mailer._gmail_token = (None, 0.0)
+        super().tearDown()
+
+    def _buy(self, oid, lang="de", variant="111"):
+        raw = ls_event(order_id=oid, lang=lang, variant=variant)
+        return self.shop.handle_webhook(raw, sign(raw))
+
+    def sends(self, p=None):
+        return [c for c in self.calls if p is None or c[0] == p]
+
+    def test_webhook_retry_or_race_never_sends_the_licence_mail_twice(self):
+        self._buy("501")
+        self.assertEqual(len(self.sends()), 1)
+        self.store.set("shop:evt:order_created:501", None, 1)          # simulate a race: the done-marker not yet written
+        self._buy("501")
+        self.assertEqual(len(self.sends()), 1)                         # licence create is idempotent + mail once-lock
+        lid = self.shop.orders()[0]["lid"]
+        self.assertEqual(self.shop._send_once("purchase", lid, "EBD-WIN", "de", "vevo@example.com", "501", True), "duplicate_blocked")
+
+    def test_uncertain_delivery_is_not_retried_or_sent_by_the_fallback(self):
+        self.beh["gmail"] = "timeout"
+        self._buy("502")
+        self.assertEqual([c[0] for c in self.sends()], ["gmail"])      # Resend NOT used: Gmail may have delivered it
+        o = self.shop.orders()[0]
+        self.assertEqual(o["mail_state"], "uncertain"); self.assertFalse(o["mail_sent"])
+        lists = self.shop.mail_lists()
+        self.assertEqual([x["lid"] for x in lists["uncertain"]], [o["lid"]]); self.assertEqual(lists["queue"], [])
+        self.beh["gmail"] = "ok"
+        self.assertEqual(self.shop.process_mail_queue()["processed"], 0)   # the queue never touches uncertain mails
+        self.assertEqual(len(self.sends()), 1)
+        r = self.shop.requeue_uncertain(lists["uncertain"][0]["id"])      # owner checked: it did not arrive
+        self.assertEqual(r["sent"], 1); self.assertEqual(len(self.sends()), 2)
+        self.assertEqual(self.shop.orders()[0]["mail_state"], "sent")
+        self.assertIn("Subject:", base64_decode(self.sends()[-1][2]["raw"]))      # a complete message was re-rendered
+
+    def test_gmail_5xx_is_uncertain_but_a_token_error_falls_back_to_resend_with_idempotency_key(self):
+        self.beh["gmail"] = "500"
+        e = self.mail.send("b@example.com", "s", "t", kind="purchase", idempotency_key="ebd-purchase-L1")
+        self.assertTrue(e["uncertain"]); self.assertEqual([c[0] for c in self.sends()], ["gmail"])
+        self.beh["gmail"] = "token"
+        M.Mailer._gmail_token = (None, 0.0)                            # force a token refresh (it fails = nothing was sent)
+        e = self.mail.send("b@example.com", "s", "t", kind="purchase", idempotency_key="ebd-purchase-L2")
+        self.assertTrue(e["sent"]); self.assertEqual(e["provider"], "resend")
+        self.assertEqual(self.sends("resend")[-1][1]["Idempotency-Key"], "ebd-purchase-L2")
+
+    def test_resend_5xx_is_retried_once_with_the_same_idempotency_key(self):
+        self.beh.update(gmail="token", resend="500once")
+        e = self.mail.send("b@example.com", "s", "t", kind="purchase", idempotency_key="ebd-purchase-L3")
+        self.assertTrue(e["sent"])
+        keys = [c[1]["Idempotency-Key"] for c in self.sends("resend")]
+        self.assertEqual(keys, ["ebd-purchase-L3", "ebd-purchase-L3"])
+
+    def test_free_quota_reached_queues_the_mail_and_the_queue_sends_it_later(self):
+        os.environ["RESEND_DAILY_LIMIT"] = "2"
+        self.beh["gmail"] = "token"                                    # Gmail down (e.g. token revoked)
+        self._buy("511"); self._buy("512")
+        self.assertEqual(len(self.sends("resend")), 2)
+        self._buy("513")                                               # 3rd: Resend daily quota reached -> not sent, queued
+        self.assertEqual(len(self.sends("resend")), 2)
+        q = self.shop.mail_lists()["queue"]
+        self.assertEqual(len(q), 1); self.assertIn("quota_daily", q[0]["error"]); self.assertNotIn("vevo@example.com", json.dumps(self.store.get("mail:queue")))
+        self.assertEqual(self.store.get("mail:queue")[0]["to"], "ve***@example.com")   # address stored encrypted (to_enc) + masked
+        self.beh["gmail"] = "ok"                                       # Gmail back -> queue drains, key regenerated from the encrypted copy
+        r = self.shop.process_mail_queue()
+        self.assertEqual((r["sent"], r["left"]), (1, 0))
+        self.assertEqual(len(self.sends("gmail")), 1)
+        st = M.stats(self.store, self.mail)
+        self.assertEqual(st["resend"]["daily_used"], 2); self.assertEqual(st["monthly"]["resend:sent"], 2); self.assertEqual(st["monthly"]["gmail:sent"], 1)
+        self.assertGreaterEqual(st["monthly"]["resend:failed"], 1)
+
+    def test_simulated_failure_works_in_test_mode_only(self):
+        e = self.mail.send("b@example.com", "s", "t", kind="test", simulate_fail=["gmail"])
+        self.assertEqual((e["sent"], e["provider"], e["fallback_from"]), (True, "resend", ["gmail:simulated_gmail"]))
+        os.environ["SHOP_MODE"] = "live"
+        e = self.mail.send("b@example.com", "s", "t", kind="test", simulate_fail=["gmail"])
+        self.assertEqual(e["provider"], "gmail")                       # never simulated on the live shop
+        os.environ["SHOP_MODE"] = "test"
+
+    def test_resend_as_the_only_primary_sender_while_gmail_is_pending(self):
+        os.environ.update({"MAIL_PROVIDER": "resend", "MAIL_FALLBACK": "none"})
+        try:
+            self.assertEqual(self.mail.chain(), ["resend"])
+            e = self.mail.send("b@example.com", "s", "t", kind="purchase", idempotency_key="k")
+            self.assertEqual((e["sent"], e["provider"]), (True, "resend")); self.assertEqual(self.sends("gmail"), [])
+            self.beh["resend"] = "422"
+            e = self.mail.send("b@example.com", "s", "t", kind="purchase")
+            self.assertFalse(e["sent"]); self.assertEqual(self.sends("gmail"), [])     # no silent switch to Gmail
+        finally:
+            os.environ.pop("MAIL_PROVIDER"); os.environ.pop("MAIL_FALLBACK")
+
+    def test_purge_removes_test_mails_from_the_queue(self):
+        self.beh.update(gmail="token", resend="422")
+        self._buy("521")
+        self.assertEqual(len(self.shop.mail_lists()["queue"]), 1)
+        self.shop.purge_test_data()
+        self.assertEqual(self.shop.mail_lists()["queue"], [])
+
+
+def base64_decode(raw):
+    import base64 as _b
+    return _b.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", "replace")
+
+
 class OfficialSiteLinkTest(Base):
     """2026-11-14: every customer e-mail points to the official domain (language-specific pages)."""
     def test_mails_link_the_official_domain_in_every_language(self):

@@ -20,7 +20,7 @@ import time
 
 import mail_templates
 import s3presign
-from licensing import PRODUCTS, LicenseError, email_hash
+from licensing import PRODUCTS, LicenseError, decrypt_key, email_hash, encrypt_key
 
 logger = logging.getLogger("ebike-doctor.shop")
 PRICES = {"EBD-WIN": ("19.99", "EUR"), "EBD-AND": ("14.99", "EUR")}   # one EUR store, one-time purchases
@@ -145,16 +145,114 @@ class Shop:
             self.store.incr(f"shop:revenue_cents:{month}:{money['currency'] or 'EUR'}:{md}", 800 * 86_400, money["total"])
             if money["tax"]:
                 self.store.incr(f"shop:tax_cents:{month}:{money['currency'] or 'EUR'}:{md}", 800 * 86_400, money["tax"])
-            link = self.download_link(rec["lid"], prod)
-            subject, text, html = mail_templates.purchase(prod, lang, name, key, link, test_mode)
-            sent = self.mailer.send(email, subject, text, kind="purchase", html=html)
             issued.append(rec["lid"])
+            state = self._send_once("purchase", rec["lid"], prod, lang, email, order_id, test_mode, key=key, name=name)
             self._log_order({"t": int(self.clock()), "order": order_id, "product": prod, "mode": md, **money, "lid": rec["lid"],
-                             "email": rec.get("email_masked", ""), "lang": lang, "mail_sent": bool(sent.get("sent")), "refunded": False})
-            if not sent.get("sent"):
-                logger.error("order %s: licence %s created but the e-mail was not sent (%s) - buyer can use the re-send form",
-                             order_id, rec["lid"], sent.get("error"))
+                             "email": rec.get("email_masked", ""), "lang": lang, "mail_sent": state == "sent", "mail_state": state,
+                             "refunded": False})
+            if state != "sent":
+                logger.error("order %s: licence %s created, purchase e-mail state=%s", order_id, rec["lid"], state)
+        self.process_mail_queue(limit=5)          # opportunistic: queued mails go out as soon as a provider works again
         return {"ok": True, "licences": issued}
+
+    # ------------------------------------------------------------------ e-mail: once per (kind, licence) + safe queue
+    def _render_mail(self, kind, lid, prod, lang, order_id, test_mode, key=None, name=""):
+        if kind == "purchase":
+            rec = self.licenses.get(lid)
+            key = key or self.licenses.recover_key(rec)
+            if not key:
+                return None
+            return mail_templates.purchase(prod, lang, name, key, self.download_link(lid, prod), test_mode)
+        return mail_templates.refund(prod, lang, order_id, self.licenses.get(lid).get("key_hint", ""), test_mode)
+
+    def _send_once(self, kind, lid, prod, lang, email, order_id, test_mode, key=None, name=""):
+        """At most ONE automatic send per (kind, licence) - a webhook retry or a race can never mail the licence twice.
+        sent -> done · uncertain -> recorded for the owner, NO automatic retry · definite failure -> encrypted queue."""
+        if not email:
+            return "no_email"
+        if self.store.incr(f"mail:once:{kind}:{lid}", 800 * 86_400) != 1:
+            logger.warning("%s e-mail for %s already attempted - not sent again", kind, lid)
+            return "duplicate_blocked"
+        msg = self._render_mail(kind, lid, prod, lang, order_id, test_mode, key=key, name=name)
+        if not msg:
+            return "no_key"
+        subject, text, html = msg
+        r = self.mailer.send(email, subject, text, kind=kind, html=html, idempotency_key=f"ebd-{kind}-{lid}")
+        if r.get("sent"):
+            return "sent"
+        item = {"id": f"{kind}-{lid}", "kind": kind, "lid": lid, "product": prod, "lang": lang, "order": str(order_id), "test": bool(test_mode),
+                "to_enc": encrypt_key(email, "mailq:" + lid), "to": r.get("to", ""), "t": int(self.clock()), "attempts": 1,
+                "error": r.get("error", "")}
+        if r.get("uncertain"):
+            self._mail_list_put("mail:uncertain", item)
+            return "uncertain"
+        if r.get("error") == "not_configured":
+            item["error"] = "not_configured"
+        self._mail_list_put("mail:queue", item)
+        return "queued"
+
+    def _mail_list_put(self, name, item):
+        lst = self.store.get(name) or []
+        lst = [x for x in (lst if isinstance(lst, list) else []) if x.get("id") != item["id"]][-199:] + [item]
+        self.store.set(name, lst, 30 * 86_400)
+
+    def mail_lists(self):
+        out = {}
+        for name in ("mail:queue", "mail:uncertain"):
+            lst = self.store.get(name) or []
+            out[name.split(":")[1]] = [{k: x.get(k) for k in ("id", "kind", "lid", "product", "lang", "order", "test", "to", "t", "attempts", "error")}
+                                       for x in (lst if isinstance(lst, list) else [])]
+        return out
+
+    def process_mail_queue(self, limit=20):
+        """Re-sends DEFINITELY failed mails (quota reached, provider down/refused). Never touches 'uncertain' items."""
+        lst = self.store.get("mail:queue") or []
+        lst = lst if isinstance(lst, list) else []
+        if not lst or not self.mailer.configured:
+            return {"processed": 0, "sent": 0, "left": len(lst)}
+        keep, sent, done = [], 0, 0
+        for item in lst:
+            if done >= limit or item.get("attempts", 0) >= 30 or self.clock() - item.get("t", 0) > 14 * 86_400:
+                keep.append(item); continue
+            done += 1
+            email = decrypt_key(item.get("to_enc", ""), "mailq:" + item["lid"])
+            msg = self._render_mail(item["kind"], item["lid"], item["product"], item["lang"], item["order"], item.get("test"))
+            if not email or not msg:
+                item["error"] = "cannot_render"; keep.append(item); continue
+            subject, text, html = msg
+            r = self.mailer.send(email, subject, text, kind=item["kind"] + "-queued", html=html, idempotency_key=f"ebd-{item['kind']}-{item['lid']}")
+            if r.get("sent"):
+                sent += 1
+                if item["kind"] == "purchase":
+                    self._mark_order_mail(item["lid"], "sent")
+            elif r.get("uncertain"):
+                item.update(error=r.get("error", ""), attempts=item.get("attempts", 0) + 1)
+                self._mail_list_put("mail:uncertain", item)
+            else:
+                item.update(error=r.get("error", ""), attempts=item.get("attempts", 0) + 1)
+                keep.append(item)
+        self.store.set("mail:queue", keep, 30 * 86_400)
+        return {"processed": done, "sent": sent, "left": len(keep)}
+
+    def _mark_order_mail(self, lid, state):
+        orders = self.store.get("shop:orders") or []
+        if isinstance(orders, list):
+            for o in orders:
+                if o.get("lid") == lid:
+                    o["mail_state"], o["mail_sent"] = state, state == "sent"
+            self.store.set("shop:orders", orders, 800 * 86_400)
+
+    def requeue_uncertain(self, item_id):
+        """Owner decision after checking the provider dashboard / the buyer: the uncertain mail did NOT arrive -> send again."""
+        unc = self.store.get("mail:uncertain") or []
+        unc = unc if isinstance(unc, list) else []
+        item = next((x for x in unc if x.get("id") == item_id), None)
+        if not item:
+            raise LicenseError("not_found", 404, "No such uncertain mail")
+        self.store.set("mail:uncertain", [x for x in unc if x.get("id") != item_id], 30 * 86_400)
+        item["error"] = "requeued by owner"
+        self._mail_list_put("mail:queue", item)
+        return self.process_mail_queue(limit=5)
 
     def _order_refunded(self, order_id, attrs, test_mode=False):
         orders = self.store.get("shop:orders") or []
@@ -198,12 +296,9 @@ class Shop:
         self.store.set("shop:orders", orders, 800 * 86_400)
         email = attrs.get("user_email", "")
         for lid, prod in revoked:      # buyer notice: licence revoked (the money is returned by Lemon Squeezy)
-            if not email:
-                break
-            subject, text, html = mail_templates.refund(prod, lang, order_id, self.licenses.get(lid).get("key_hint", ""), mode == "test")
-            sent = self.mailer.send(email, subject, text, kind="refund", html=html)
-            if not sent.get("sent"):
-                logger.error("order %s refunded, licence %s revoked, notice e-mail not sent (%s)", order_id, lid, sent.get("error"))
+            state = self._send_once("refund", lid, prod, lang, email, order_id, mode == "test")
+            if state != "sent":
+                logger.error("order %s refunded, licence %s revoked, notice e-mail state=%s", order_id, lid, state)
         return {"ok": True, "revoked": [l for l, _ in revoked]}
 
     # ------------------------------------------------------------------ downloads
@@ -305,6 +400,10 @@ class Shop:
         orders = self.store.get("shop:orders") or []
         if isinstance(orders, list):
             self.store.set("shop:orders", [o for o in orders if o.get("mode") != "test"], 800 * 86_400)
+        for name in ("mail:queue", "mail:uncertain"):          # test mails waiting in the queue / uncertain list
+            lst = self.store.get(name) or []
+            if isinstance(lst, list):
+                self.store.set(name, [x for x in lst if not x.get("test")], 30 * 86_400)
         t = time.gmtime(self.clock())
         y, m = t.tm_year, t.tm_mon
         for _ in range(24):

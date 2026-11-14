@@ -41,6 +41,21 @@ def new_vars():
             "ADMIN_HEADER_TOKEN": "1"}
 
 
+def mail_vars(mode):
+    """Production mail sender (chosen at deploy time, only with the owner's approval):
+      resend-primary : Resend only (own domain licenc@mail.ebikedoctorpro.com) - while the Gmail API verification is pending
+      gmail-primary  : Gmail API primary (token from C:\\EBD_SIGNING\\gmail-oauth-2026-11-14) + Resend fallback - after Google's approval
+      none           : no mail variables (licence mails stay in the outbox; buyers can use the re-send form later)"""
+    if mode == "none":
+        return {}
+    rk = open(r"C:\EBD_SIGNING\resend-api-key.txt", encoding="utf-8-sig").read().strip()
+    base = {"RESEND_API_KEY": rk, "RESEND_FROM": "E-Bike Doctor PRO <licenc@mail.ebikedoctorpro.com>", "MAIL_REPLY_TO": "dukaibalint37@gmail.com"}
+    if mode == "resend-primary":
+        return {**base, "MAIL_PROVIDER": "resend", "MAIL_FALLBACK": "none"}
+    g = json.load(open(r"C:\EBD_SIGNING\gmail-oauth-2026-11-14\gmail-oauth.json", encoding="utf-8"))
+    return {**base, **g, "MAIL_FROM": "E-Bike Doctor PRO <dukaibalint37@gmail.com>", "MAIL_PROVIDER": "gmail", "MAIL_FALLBACK": "resend"}
+
+
 def git(*a):
     return subprocess.run([GIT, "-C", REPO, *a], capture_output=True, text=True, check=True).stdout.strip()
 
@@ -81,7 +96,10 @@ def regression():
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "plan"
     env = current_env()
-    add = new_vars()
+    mode = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--mail=")), "resend-primary")
+    assert mode in ("resend-primary", "gmail-primary", "none"), "--mail=resend-primary|gmail-primary|none"
+    add = {**new_vars(), **mail_vars(mode)}
+    print("mail configuration:", mode)
     if cmd == "plan":
         print("existing variables kept unchanged:", len(env))
         print("variables to ADD/SET:", sorted(add), "| already present:", sorted(k for k in add if k in env))

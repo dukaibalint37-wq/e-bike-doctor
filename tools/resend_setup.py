@@ -56,11 +56,22 @@ elif cmd == "testmail":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     import mail_templates as MT
     to = sys.argv[2]
-    for lang in ("hu", "de", "en"):
-        subj, text, html = MT.purchase("EBD-WIN", lang, "Resend teszt", "EBDW-TEST0-RESND-DUMMY-00000", "https://ebikedoctorpro.com/", True)
-        s, r = resend("POST", "/emails", {"from": FROM, "to": [to], "reply_to": REPLY_TO, "subject": "[Resend teszt] " + subj, "text": text, "html": html})
-        print(lang, "->", s, (r.get("id") if isinstance(r, dict) else r))
-        time.sleep(1)
+    run = time.strftime("%Y%m%d%H%M%S")
+    for prod in ("EBD-AND", "EBD-WIN"):
+        for lang in ("hu", "de", "en"):
+            dummy = ("EBDA" if prod == "EBD-AND" else "EBDW") + "-TEST0-RESND-DUMMY-00000"
+            subj, text, html = MT.purchase(prod, lang, "Resend teszt", dummy, MT.site_url(lang, "downloads"), True)
+            req = urllib.request.Request("https://api.resend.com/emails", method="POST",
+                                         data=json.dumps({"from": FROM, "to": [to], "reply_to": REPLY_TO, "subject": "[Resend teszt] " + subj,
+                                                          "text": text, "html": html}).encode(),
+                                         headers={"Authorization": "Bearer " + key(), "Content-Type": "application/json", "User-Agent": "ebd-setup",
+                                                  "Idempotency-Key": f"ebd-resend-test-{run}-{prod}-{lang}"})
+            try:
+                with urllib.request.urlopen(req, timeout=30) as x:
+                    print(prod, lang, "->", x.status, "id", json.loads(x.read()).get("id"))
+            except urllib.error.HTTPError as e:
+                print(prod, lang, "->", e.code, e.read()[:200].decode("utf-8", "replace"))
+            time.sleep(0.7)                    # Resend default rate limit: 2 requests / second
 elif cmd == "staging":
     if "--confirm" not in sys.argv:
         sys.exit("refused: add --confirm")

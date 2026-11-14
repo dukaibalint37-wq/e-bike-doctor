@@ -33,6 +33,7 @@ import admin_auth
 import analytics
 import interest as interest_mod
 import mailer as mailer_mod
+import mail_templates as mailer_templates
 import s3presign
 import shop as shop_mod
 from store import make_store
@@ -824,7 +825,50 @@ def admin_dashboard(mode: str = "live", x_admin_token: Optional[str] = Header(de
                        "lemonsqueezy_map": bool(shop_mod.product_map()), "webhook_secret": bool(os.getenv("LEMONSQUEEZY_WEBHOOK_SECRET", "").strip()),
                        "cors_origins": CORS_ORIGINS, "admin_2fa": ADMIN_AUTH.configured,
                        "header_token_enabled": os.getenv("ADMIN_HEADER_TOKEN", "1").strip() != "0", "store": STORE.kind},
-            "outbox": list(reversed(outbox if isinstance(outbox, list) else []))[:30], "audit": ADMIN_AUTH.audit_log()[:40]}
+            "outbox": list(reversed(outbox if isinstance(outbox, list) else []))[:30], "audit": ADMIN_AUTH.audit_log()[:40],
+            "mail": {**mailer_mod.stats(MAILER.store, MAILER), **SHOP.mail_lists()}}
+
+
+@app.post("/v1/admin/mail/queue/process")
+def admin_mail_queue(x_admin_token: Optional[str] = Header(default=None), request: Request = None):
+    _admin(x_admin_token, request)
+    r = SHOP.process_mail_queue(limit=20)
+    ADMIN_AUTH.audit("mail_queue_process", "", json.dumps(r))
+    return r
+
+
+@app.post("/v1/admin/mail/uncertain/{item_id}/requeue")
+def admin_mail_requeue(item_id: str, x_admin_token: Optional[str] = Header(default=None), request: Request = None):
+    """Owner checked that an UNCERTAIN mail did not arrive -> it may be sent again (never automatic)."""
+    _admin(x_admin_token, request)
+    try:
+        r = SHOP.requeue_uncertain(item_id[:80])
+    except licensing_mod.LicenseError as exc:
+        raise _lic_error(exc) from None
+    ADMIN_AUTH.audit("mail_requeue_uncertain", item_id[:80], json.dumps(r))
+    return r
+
+
+class MailTestRequest(BaseModel):
+    to: str = Field(min_length=6, max_length=200)
+    lang: Literal["hu", "de", "en"] = "en"
+    product: Literal["EBD-WIN", "EBD-AND"] = "EBD-WIN"
+    simulate_fail: list[Literal["gmail", "resend", "brevo", "smtp"]] = Field(default_factory=list, max_length=4)
+
+
+@app.post("/v1/admin/mail/test")
+def admin_mail_test(req: MailTestRequest, x_admin_token: Optional[str] = Header(default=None), request: Request = None):
+    """Sends the purchase template with a DUMMY key through the real provider chain. simulate_fail (test mode only) makes a
+    provider fail on purpose, to prove the fallback without touching any credential."""
+    _admin(x_admin_token, request)
+    if not shop_mod.EMAIL_RE.fullmatch(req.to.strip()):
+        raise HTTPException(status_code=422, detail="Invalid e-mail address")
+    dummy = ("EBDW" if req.product == "EBD-WIN" else "EBDA") + "-TEST0-DUMMY-KEY00-00000"
+    subject, text, html = mailer_templates.purchase(req.product, req.lang, "", dummy, mailer_templates.site_url(req.lang, "downloads"), True)
+    r = MAILER.send(req.to.strip(), "[TEST] " + subject, text, kind="test", html=html, simulate_fail=req.simulate_fail)
+    ADMIN_AUTH.audit("mail_test", r.get("to", ""), f"{r.get('provider')} sent={r.get('sent')} sim={','.join(req.simulate_fail)}")
+    return {k: r.get(k) for k in ("sent", "provider", "error", "uncertain", "fallback_from", "to")} | {"chain": MAILER.chain(),
+                                                                                                      "simulated": sorted(MAILER.simulated_failures(req.simulate_fail))}
 
 
 class PurgeRequest(BaseModel):

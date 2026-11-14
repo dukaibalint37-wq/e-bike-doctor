@@ -112,6 +112,14 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:24px}
    <div class="grid2"><div class="box"><h2>Beállítások állapota</h2><div id="sysConfig"></div></div><div class="box"><h2>Tesztadatok leválasztása</h2>
     <p class="muted" style="font-size:13.5px">Élesítés előtt: minden tesztlicenc visszavonása és „leválasztott” jelölése, a tesztrendelések törlése a naplóból, a tesztszámlálók nullázása. Az éles adatok nem változnak.</p>
     <label>Megerősítés – írd be pontosan: TESZTADATOK TORLESE<input type="text" id="purgeConfirm" autocomplete="off"></label><button class="btn danger sm" id="purgeBtn">Tesztadatok leválasztása</button><p class="msg" id="purgeMsg"></p></div></div>
+   <div class="box"><h2>Levélküldés – szolgáltatók, forgalom, várólista</h2>
+    <div class="kpis" id="mailKpis"></div>
+    <div id="mailProviders"></div>
+    <h3 style="margin:14px 0 6px">Napi forgalom (14 nap)</h3><div id="mailDaily"></div>
+    <h3 style="margin:14px 0 6px">Várólista – biztosan ki nem ment levelek (kvóta / szolgáltató hiba)</h3>
+    <div class="row" style="margin-bottom:8px"><button class="btn sm" id="mailQueueBtn">Várólista feldolgozása most</button><span class="msg" id="mailQueueMsg"></span></div><div id="mailQueue"></div>
+    <h3 style="margin:14px 0 6px">Bizonytalan kézbesítés – automatikusan NEM küldjük újra</h3>
+    <p class="muted" style="font-size:12.5px">Időtúllépés vagy szerverhiba a küldés után: lehet, hogy a levél kiment. Csak akkor küldd újra, ha a Resend/Gmail felületén vagy a vevőnél ellenőrizted, hogy nem érkezett meg (különben dupla licenclevél lenne).</p><div id="mailUncertain"></div></div>
    <div class="box"><h2>Kimenő levelek (utolsó 30, titkok nélkül)</h2><div id="sysOutbox"></div></div>
    <div class="box"><h2>Admin-napló</h2><div id="sysAudit"></div></div>
   </section>
@@ -254,7 +262,28 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:24px}
       ['Kétlépcsős admin-belépés', yes(c.admin_2fa)], ['Fejléc-token (automatizálás)', el('span', { cls: c.header_token_enabled ? 'warn' : 'ok', text: c.header_token_enabled ? 'engedélyezve' : 'tiltva (csak 2FA)' })],
       ['Weboldal-eredet (CORS)', el('span', { text: c.cors_origins.join(', ') || '–' })], ['Tároló', el('span', { text: c.store })]]));
     put('sysOutbox', table([['Időpont', function (o) { return fmtTs(o.t); }], ['Típus', function (o) { return o.kind; }], ['Címzett', function (o) { return o.to; }], ['Tárgy', function (o) { return o.subject; }, 'wrap'],
-      ['Eredmény', function (o) { return el('span', { cls: o.sent ? 'ok' : 'bad', text: o.sent ? 'elküldve' : (o.error || 'hiba') }); }]], d.outbox, 'Nincs kimenő levél.'));
+      ['Küldő', function (o) { return (o.provider || '') + (o.fallback_from ? ' (tartalék)' : ''); }],
+      ['Eredmény', function (o) { return el('span', { cls: o.sent ? 'ok' : (o.uncertain ? 'warn' : 'bad'), text: o.sent ? 'elküldve' : (o.uncertain ? 'BIZONYTALAN – ' + (o.error || '') : (o.error || 'hiba')) }); }]], d.outbox, 'Nincs kimenő levél.'));
+    var ml = d.mail || {}, rs = ml.resend || {}, mm = ml.monthly || {}, td = (ml.daily || [])[0] || {};
+    var sum = function (o, outc) { return ['gmail', 'resend', 'brevo', 'smtp'].reduce(function (a, p) { return a + (o[p + ':' + outc] || 0); }, 0); };
+    kpis('mailKpis', [[String(sum(td, 'sent')), 'Elküldve ma', 'sikertelen ' + sum(td, 'failed') + ' · bizonytalan ' + sum(td, 'uncertain')],
+      [String(sum(mm, 'sent')), 'Elküldve – ' + (ml.month ? ml.month.slice(0, 4) + '-' + ml.month.slice(4) : ''), 'sikertelen ' + sum(mm, 'failed') + ' · bizonytalan ' + sum(mm, 'uncertain')],
+      [(rs.daily_used || 0) + ' / ' + (rs.daily_limit || 100), 'Resend ma (ingyenes keret)', 'havi: ' + (rs.monthly_used || 0) + ' / ' + (rs.monthly_limit || 3000)],
+      [String((ml.queue || []).length), 'Várólistán', 'bizonytalan: ' + (ml.uncertain || []).length]]);
+    var lastTxt = function (p, w) { var x = (ml.last || {})[p + ':' + w]; return x ? fmtTs(x.t) + (x.error ? ' (' + x.error + ')' : '') : '–'; };
+    put('mailProviders', table([['Szolgáltató', function (p) { return p + ((ml.chain || [])[0] === p ? ' – elsődleges' : ((ml.chain || []).indexOf(p) > 0 ? ' – tartalék' : '')); }],
+      ['Állapot', function (p) { var on = (ml.chain || []).indexOf(p) >= 0; return el('span', { cls: on ? 'ok' : 'muted', text: on ? 'beállítva' : 'nincs beállítva' }); }],
+      ['Hónap: elküldve / hiba / bizonytalan', function (p) { return (mm[p + ':sent'] || 0) + ' / ' + (mm[p + ':failed'] || 0) + ' / ' + (mm[p + ':uncertain'] || 0); }, 'num'],
+      ['Utolsó sikeres', function (p) { return lastTxt(p, 'ok'); }], ['Utolsó hiba', function (p) { return lastTxt(p, 'fail'); }, 'wrap']],
+      ['gmail', 'resend'].concat((ml.chain || []).filter(function (p) { return p !== 'gmail' && p !== 'resend'; }))));
+    put('mailDaily', table([['Nap', function (r) { return fmtDay(r.day); }], ['Gmail ✓', function (r) { return r['gmail:sent'] || 0; }, 'num'], ['Gmail ✗', function (r) { return (r['gmail:failed'] || 0) + (r['gmail:uncertain'] ? ' / ?' + r['gmail:uncertain'] : ''); }, 'num'],
+      ['Resend ✓', function (r) { return r['resend:sent'] || 0; }, 'num'], ['Resend ✗', function (r) { return (r['resend:failed'] || 0) + (r['resend:uncertain'] ? ' / ?' + r['resend:uncertain'] : ''); }, 'num']], (ml.daily || []).slice(0, 14)));
+    var qcols = [['Időpont', function (x) { return fmtTs(x.t); }], ['Típus', function (x) { return x.kind; }], ['Licenc', function (x) { return x.lid; }], ['Rendelés', function (x) { return x.order; }],
+      ['Címzett', function (x) { return x.to; }], ['Nyelv', function (x) { return x.lang; }], ['Próbák', function (x) { return x.attempts; }, 'num'], ['Hiba', function (x) { return x.error; }, 'wrap']];
+    put('mailQueue', table(qcols, ml.queue || [], 'A várólista üres.'));
+    put('mailUncertain', table(qcols.concat([['', function (x) { var b = el('button', { cls: 'btn sm', text: 'Nem érkezett meg – újraküldés' }); b.addEventListener('click', function () {
+      if (!confirm('Biztosan ellenőrizted, hogy a levél NEM érkezett meg? Újraküldés: ' + x.id)) return;
+      api('/v1/admin/mail/uncertain/' + encodeURIComponent(x.id) + '/requeue', { method: 'POST' }).then(function () { load(); }); }); return b; }]]), ml.uncertain || [], 'Nincs bizonytalan kézbesítés.'));
     put('sysAudit', table([['Időpont', function (a) { return fmtTs(a.t); }], ['Esemény', function (a) { return a.a; }], ['Részlet', function (a) { return a.d; }]], d.audit));
   }
 
@@ -313,6 +342,10 @@ footer{color:var(--dim);font-size:12px;text-align:center;padding:24px}
   });
   $('#licSearch').addEventListener('click', searchLic); $('#licQ').addEventListener('keydown', function (e) { if (e.key === 'Enter') searchLic(); });
   $('#intCsv').addEventListener('click', function () { api('/v1/admin/interest?format=csv').then(function (r) { return r.blob(); }).then(function (bl) { var a = el('a', { href: URL.createObjectURL(bl), download: 'smart-hardware-erdeklodok.csv' }); document.body.appendChild(a); a.click(); a.remove(); }); });
+  $('#mailQueueBtn').addEventListener('click', function () {
+    api('/v1/admin/mail/queue/process', { method: 'POST' }).then(function (r) { return r.json(); })
+      .then(function (j) { $('#mailQueueMsg').className = 'msg ok'; $('#mailQueueMsg').textContent = 'Feldolgozva: ' + j.processed + ', elküldve: ' + j.sent + ', maradt: ' + j.left; load(); });
+  });
   $('#purgeBtn').addEventListener('click', function () {
     var c = $('#purgeConfirm').value.trim(); if (c !== 'TESZTADATOK TORLESE') { $('#purgeMsg').className = 'msg'; $('#purgeMsg').textContent = 'A megerősítő szöveg nem egyezik.'; return; }
     api('/v1/admin/test-data/purge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: c }) }).then(function (r) { return r.json(); })

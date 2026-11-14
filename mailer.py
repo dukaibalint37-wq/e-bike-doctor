@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import smtplib
+import socket
 import ssl
 import time
 import urllib.error
@@ -39,6 +40,27 @@ BREVO_URL = "https://api.brevo.com/v3/smtp/email"
 
 def _env(k):
     return os.getenv(k, "").strip()
+
+
+def _int_env(k, default):
+    try:
+        return int(_env(k) or default)
+    except ValueError:
+        return default
+
+
+class DefiniteFailure(Exception):
+    """The provider certainly did NOT accept the message (nothing left our side / refused before sending)."""
+
+
+def _uncertain(exc):
+    """True when we cannot know whether the provider accepted the message (timeout, connection dropped after sending)."""
+    if isinstance(exc, (DefiniteFailure, RuntimeError)):            # RuntimeError = Gmail token refresh failed (before sending)
+        return False
+    if isinstance(exc, urllib.error.URLError) and not isinstance(exc, urllib.error.HTTPError):
+        r = exc.reason
+        return not isinstance(r, (ConnectionRefusedError, socket.gaierror))   # refused / DNS -> nothing was sent
+    return True
 
 
 class Mailer:
@@ -102,7 +124,7 @@ class Mailer:
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode("utf-8", "replace")[:500]
 
-    def _send_resend(self, to, subject, text, html, headers):
+    def _send_resend(self, to, subject, text, html, headers, idem=None):
         payload = {"from": self.sender_for("resend"), "to": [to], "subject": subject, "text": text}
         if html:
             payload["html"] = html
@@ -110,7 +132,44 @@ class Mailer:
             payload["reply_to"] = _env("MAIL_REPLY_TO")
         if headers:
             payload["headers"] = headers
-        return self._http_post(RESEND_URL, {"Authorization": "Bearer " + _env("RESEND_API_KEY")}, payload)
+        h = {"Authorization": "Bearer " + _env("RESEND_API_KEY")}
+        if idem:
+            h["Idempotency-Key"] = idem[:256]     # Resend de-duplicates the same key for 24 h -> a safe single retry
+        try:
+            status, body = self._http_post(RESEND_URL, h, payload)
+        except Exception as exc:
+            if not idem or not _uncertain(exc):
+                raise
+            time.sleep(1)                         # same Idempotency-Key: Resend sends it at most once
+            return self._http_post(RESEND_URL, h, payload)
+        if idem and status >= 500:
+            time.sleep(1)
+            status, body = self._http_post(RESEND_URL, h, payload)
+        return status, body
+
+    # ------------------------------------------------------------------ quota (free plans) + traffic counters
+    def _quota_block(self, p):
+        """Free-plan guard: Resend free = 100/day, 3000/month (RESEND_DAILY_LIMIT / RESEND_MONTHLY_LIMIT override).
+        Counts sent + uncertain attempts. Returns an error text when the provider must not be used now."""
+        if p != "resend":
+            return ""
+        day, month = time.strftime("%Y%m%d", time.gmtime()), time.strftime("%Y%m", time.gmtime())
+        used_d = sum(int(self.store.get(f"mail:stat:{day}:resend:{o}") or 0) for o in ("sent", "uncertain"))
+        used_m = sum(int(self.store.get(f"mail:statm:{month}:resend:{o}") or 0) for o in ("sent", "uncertain"))
+        if used_d >= _int_env("RESEND_DAILY_LIMIT", 100):
+            return "quota_daily"
+        if used_m >= _int_env("RESEND_MONTHLY_LIMIT", 3000):
+            return "quota_monthly"
+        return ""
+
+    def _count(self, p, outcome, err=""):
+        day, month = time.strftime("%Y%m%d", time.gmtime()), time.strftime("%Y%m", time.gmtime())
+        try:
+            self.store.incr(f"mail:stat:{day}:{p}:{outcome}", 400 * 86_400)
+            self.store.incr(f"mail:statm:{month}:{p}:{outcome}", 800 * 86_400)
+            self.store.set(f"mail:last:{p}:{'ok' if outcome == 'sent' else 'fail'}", {"t": int(time.time()), "outcome": outcome, "error": err[:60]}, 400 * 86_400)
+        except Exception:
+            pass
 
     def _send_brevo(self, to, subject, text, html, headers):
         name, addr = parseaddr(self.sender_for("brevo"))
@@ -169,30 +228,56 @@ class Mailer:
         return 250, ""
 
     # ------------------------------------------------------------------ public
-    def send(self, to, subject, body, kind="info", html=None, headers=None):
-        """Never raises (a mail problem must not break a webhook). Returns the outbox entry (sent True/False)."""
+    def simulated_failures(self, extra=None):
+        """TEST MODE ONLY: providers that must fail on purpose (MAIL_SIMULATE_FAILURE env or an admin test request), to test the
+        failover without touching real credentials. Ignored when SHOP_MODE=live."""
+        if _env("SHOP_MODE").lower() == "live":
+            return set()
+        return {x.strip().lower() for x in (_env("MAIL_SIMULATE_FAILURE").split(",") + list(extra or [])) if x.strip()}
+
+    def send(self, to, subject, body, kind="info", html=None, headers=None, idempotency_key=None, simulate_fail=None):
+        """Never raises (a mail problem must not break a webhook). Returns the outbox entry.
+        sent=True: accepted by a provider. uncertain=True: we cannot know (timeout / 5xx after sending) -> NO fallback and NO
+        automatic retry (no duplicate licence mail); the owner decides in the admin. Otherwise the next provider is tried."""
         chain = self.chain()
+        sim = self.simulated_failures(simulate_fail)
         entry = {"t": int(time.time()), "to": _mask(to), "subject": subject[:160], "kind": kind, "sent": False, "provider": self.provider}
         if chain and to and "@" in to:
             failed = []
-            for i, p in enumerate(chain):       # primary first; on failure the next provider (e.g. Gmail -> Resend)
+            for i, p in enumerate(chain):       # primary first; on a DEFINITE failure the next provider (e.g. Gmail -> Resend)
+                uncertain = False
                 try:
-                    status, resp = getattr(self, "_send_" + p)(to, subject, body, html, headers)
+                    if p in sim:
+                        raise DefiniteFailure("simulated_" + p)
+                    q = self._quota_block(p)
+                    if q:
+                        raise DefiniteFailure(q)
+                    args = (to, subject, body, html, headers) + ((idempotency_key,) if p == "resend" else ())
+                    status, resp = getattr(self, "_send_" + p)(*args)
                     if 200 <= status < 300:
                         entry.update(sent=True, provider=p)
+                        self._count(p, "sent")
                         if i:
                             entry["fallback_from"] = failed
                             logger.warning("mail sent by FALLBACK provider=%s after %s kind=%s", p, failed, kind)
                         entry.pop("error", None)
                         break
                     err = f"HTTP {status}"
+                    uncertain = status >= 500      # 5xx: maybe accepted (Resend: already retried once with the same idempotency key)
                     logger.error("mail rejected kind=%s provider=%s status=%s detail=%s", kind, p, status, _redact(resp)[:200])
                 except Exception as exc:   # never break the webhook because of mail
-                    err = str(exc)[:40] if isinstance(exc, RuntimeError) else type(exc).__name__
-                    logger.error("mail failed kind=%s provider=%s error=%s", kind, p, type(exc).__name__)
+                    err = str(exc)[:40] if isinstance(exc, (RuntimeError, DefiniteFailure)) else type(exc).__name__
+                    uncertain = _uncertain(exc)
+                    logger.error("mail failed kind=%s provider=%s error=%s uncertain=%s", kind, p, err, uncertain)
                 failed.append(f"{p}:{err}")
                 entry["error"] = err
-            if not entry["sent"] and len(chain) > 1:
+                self._count(p, "uncertain" if uncertain else "failed", err)
+                if uncertain:
+                    entry["uncertain"] = True
+                    entry["provider"] = p
+                    logger.error("mail delivery UNCERTAIN kind=%s provider=%s - no automatic retry/fallback (no duplicate mail)", kind, p)
+                    break
+            if not entry["sent"] and len(failed) > 1:
                 entry["error"] = "; ".join(failed)[:120]
         else:
             entry["error"] = "not_configured"
@@ -211,6 +296,50 @@ class Mailer:
 def health(store):
     h = store.get("mail:health")
     return h if isinstance(h, dict) else {}
+
+
+def stats(store, mailer=None, days=30):
+    """Admin: per provider daily (30 days) and monthly sent / failed / uncertain counts, last success / failure, free-plan usage."""
+    from store import mget
+    now = time.time()
+    dlist = [time.strftime("%Y%m%d", time.gmtime(now - i * 86_400)) for i in range(days)]
+    month = time.strftime("%Y%m", time.gmtime(now))
+    outs = ("sent", "failed", "uncertain")
+    keys = [f"mail:stat:{d}:{p}:{o}" for d in dlist for p in PROVIDERS for o in outs]
+    keys += [f"mail:statm:{month}:{p}:{o}" for p in PROVIDERS for o in outs]
+    keys += [f"mail:last:{p}:{w}" for p in PROVIDERS for w in ("ok", "fail")]
+    vals = mget(store, keys)
+    it = iter(vals)
+    daily = []
+    for d in dlist:
+        row = {"day": d}
+        for p in PROVIDERS:
+            for o in outs:
+                v = int(next(it) or 0)
+                if v:
+                    row[f"{p}:{o}"] = v
+        daily.append(row)
+    monthly = {}
+    for p in PROVIDERS:
+        for o in outs:
+            v = int(next(it) or 0)
+            if v:
+                monthly[f"{p}:{o}"] = v
+    last = {}
+    for p in PROVIDERS:
+        for w in ("ok", "fail"):
+            v = next(it)
+            if isinstance(v, dict):
+                last[f"{p}:{w}"] = v
+    today = daily[0]
+    used_d = today.get("resend:sent", 0) + today.get("resend:uncertain", 0)
+    used_m = monthly.get("resend:sent", 0) + monthly.get("resend:uncertain", 0)
+    m = mailer or Mailer(store)
+    return {"chain": m.chain(), "month": month, "daily": daily, "monthly": monthly, "last": last,
+            "resend": {"configured": m._has_creds("resend") and "@" in m.sender_for("resend"), "from": m.sender_for("resend"),
+                       "daily_used": used_d, "daily_limit": _int_env("RESEND_DAILY_LIMIT", 100),
+                       "monthly_used": used_m, "monthly_limit": _int_env("RESEND_MONTHLY_LIMIT", 3000)},
+            "simulated_failures": sorted(m.simulated_failures())}
 
 
 def _mask(e):
