@@ -35,6 +35,23 @@ def cred():
         sys.exit(f"credential file missing: {CRED}")
     lines = [l.strip() for l in open(CRED, encoding="utf-8-sig") if l.strip()]
     kv = {l.split("=", 1)[0].strip(): l.split("=", 1)[1].strip() for l in lines if "=" in l}
+    # Cloudflare dashboard labels ("Access Key ID=...", "Secret Access Key=...") are accepted as well
+    for label, k in (("access key id", "R2_ACCESS_KEY_ID"), ("access key", "R2_ACCESS_KEY_ID"), ("secret access key", "R2_SECRET_ACCESS_KEY")):
+        for kk in list(kv):
+            if kk.lower() == label and not kv.get(k):
+                kv[k] = kv[kk]
+    # endpoint/bucket are account settings, not secrets: taken (read-only) from the existing upload file if missing
+    if not kv.get("R2_ENDPOINT") or not kv.get("R2_BUCKET"):
+        ref = r"C:\EBD_SIGNING\download-bucket.txt"
+        if os.path.exists(ref):
+            rl = [l.strip() for l in open(ref, encoding="utf-8-sig") if l.strip()]
+            rkv = {l.split("=", 1)[0].strip(): l.split("=", 1)[1].strip() for l in rl if "=" in l}
+            kv.setdefault("R2_ENDPOINT", rkv.get("R2_ENDPOINT", "")); kv.setdefault("R2_BUCKET", rkv.get("R2_BUCKET", ""))
+            if not kv["R2_ENDPOINT"]: kv["R2_ENDPOINT"] = rkv.get("R2_ENDPOINT", "")
+            if not kv["R2_BUCKET"]: kv["R2_BUCKET"] = rkv.get("R2_BUCKET", "")
+            print("endpoint + bucket taken from", ref)
+            ref_pair = (rkv.get("R2_ACCESS_KEY_ID"), rkv.get("R2_SECRET_ACCESS_KEY"))
+            print("same key pair as the upload file (download-bucket.txt):", ref_pair == (kv.get("R2_ACCESS_KEY_ID"), kv.get("R2_SECRET_ACCESS_KEY")))
     miss = [k for k in ("R2_ENDPOINT", "R2_BUCKET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY") if not kv.get(k)]
     if miss:
         sys.exit(f"credential file lacks: {miss} (expected KEY=VALUE lines)")
