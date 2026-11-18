@@ -282,6 +282,33 @@ class WebhookTest(StripeBase):
         self.assertEqual(len([c for c in self.stripe.calls if c["method"] == "GET"]), 0)            # nothing verified/issued
 
 
+class AdaptivePricingTest(StripeBase):
+    """Buyer pays in HUF through Stripe Adaptive Pricing; the shop price (EUR) is in currency_conversion."""
+    def huf_session(self, src_amount=1999, sid="cs_test_huf", pi="pi_huf"):
+        s = session(sid=sid, currency="huf", amount=799000, pi=pi)
+        s["currency_conversion"] = {"source_currency": "eur", "amount_subtotal": src_amount, "amount_total": src_amount, "fx_rate": "399.7"}
+        return s
+
+    def test_huf_payment_issues_licence_and_books_eur(self):
+        self.stripe.sessions["cs_test_huf"] = self.huf_session()
+        r = self.deliver({"id": "cs_test_huf"})
+        self.assertEqual(len(r["licences"]), 1)
+        o = self.shop.orders()[0]
+        self.assertEqual((o["total"], o["currency"], o["paid_currency"], o["paid_total"]), (1999, "EUR", "HUF", 799000))
+        m = self.owner_mails()[0]
+        self.assertIn("19.99 EUR", m["text"]); self.assertIn("HUF-ban fizetett: 7990.00 HUF", m["text"])
+        # full refund of the HUF charge → revoked, booked as the EUR order total
+        self.deliver({"id": "ch_h", "amount": 799000, "amount_refunded": 799000, "refunded": True, "currency": "huf", "payment_intent": "pi_huf",
+                      "billing_details": {"email": "vevo@example.com"}}, etype="charge.refunded", ev_id="evt_hr")
+        self.assertEqual(self.lic.get(r["licences"][0])["status"], "revoked")
+        self.assertEqual(self.shop.orders()[0]["refunded_cents"], 1999)
+
+    def test_converted_session_with_wrong_source_amount_is_rejected(self):
+        self.stripe.sessions["cs_test_bad"] = self.huf_session(src_amount=100, sid="cs_test_bad", pi="pi_bad")
+        self.assertIn("amount mismatch", self.deliver({"id": "cs_test_bad"})["ignored"])
+        self.assertEqual(self.lic.all(), [])
+
+
 class OwnerNoticeTest(StripeBase):
     def test_one_sale_notice_with_invoicing_data_and_no_licence_key(self):
         self.stripe.sessions["cs_test_1"] = session(lang="de")

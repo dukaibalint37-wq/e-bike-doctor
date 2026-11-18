@@ -233,6 +233,8 @@ class Shop:
                  ["Új sikeres vásárlás. A számlát kézzel kell kiállítani és e-mailben elküldeni a vásárlónak.", ""])
         lines += [f"Termék: {names}",
                   f"Fizetett összeg (bruttó): {self._amount(money.get('total', 0), cur)}"
+                  + (f" · a vevő {money['paid_currency']}-ban fizetett: {self._amount(money.get('paid_total', 0), money['paid_currency'])}"
+                     " (Stripe-átváltás; a számla pénzneméről a könyvelővel egyeztess)" if money.get("paid_currency") else "")
                   + (f" · ebből adó: {self._amount(money['tax'], cur)}" if money.get("tax") else "")
                   + (f" · kedvezmény: {self._amount(money['discount'], cur)}" if money.get("discount") else ""),
                   f"Időpont: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(self.clock()))}",
@@ -389,18 +391,27 @@ class Shop:
             prod = meta.get("product")
             if prod not in PRICES or meta.get("shop") != "ebd-website":
                 return self._stripe_reject(sid, "unknown product")
-            currency = str(s.get("currency", "") or "").upper()
+            # Adaptive Pricing: the buyer may pay in a local currency (e.g. HUF). The shop price and the bookkeeping amounts are
+            # then in currency_conversion (source currency = EUR); the session amounts are the converted presentment amounts.
+            cc = s.get("currency_conversion") if isinstance(s.get("currency_conversion"), dict) else None
+            paid_currency, paid_total = str(s.get("currency", "") or "").upper(), _cents(s.get("amount_total"))
+            src = cc or s
+            currency = str((cc or {}).get("source_currency") or paid_currency).upper()
             if prod not in stripe_price_map():          # inline price: the amount must be exactly the shop price
-                if currency != PRICES[prod][1] or int(s.get("amount_subtotal") or 0) != price_cents(prod):
-                    return self._stripe_reject(sid, f"amount mismatch {s.get('amount_subtotal')} {currency}")
+                if currency != PRICES[prod][1] or int(src.get("amount_subtotal") or 0) != price_cents(prod):
+                    return self._stripe_reject(sid, f"amount mismatch {src.get('amount_subtotal')} {currency}")
             cd = s.get("customer_details") or {}
             email = (cd.get("email") or s.get("customer_email") or "").strip()
             if not EMAIL_RE.fullmatch(email):
                 return self._stripe_reject(sid, "no valid buyer e-mail")
             td = s.get("total_details") or {}
-            money = {"total": _cents(s.get("amount_total")), "subtotal": _cents(s.get("amount_subtotal")), "tax": _cents(td.get("amount_tax")),
-                     "discount": _cents(td.get("amount_discount")), "currency": currency[:3], "tax_name": "", "tax_rate": 0.0,
+            total = _cents(src.get("amount_total"))
+            scale = (lambda v: round(_cents(v) * total / paid_total)) if cc and paid_total else _cents   # presentment → source currency
+            money = {"total": total, "subtotal": _cents(src.get("amount_subtotal")), "tax": scale(td.get("amount_tax")),
+                     "discount": scale(td.get("amount_discount")), "currency": currency[:3], "tax_name": "", "tax_rate": 0.0,
                      "tax_inclusive": True, "total_usd": 0, "tax_usd": 0}
+            if cc:
+                money.update(paid_currency=paid_currency[:3], paid_total=paid_total)
             pi = s.get("payment_intent")
             pi = pi.get("id") if isinstance(pi, dict) else pi
             if pi:
@@ -429,8 +440,12 @@ class Shop:
             except stripe_pay.StripeError:
                 email = ""                 # the licence is still revoked; the notice is then not sent (logged)
         cur = str(charge.get("currency", "") or "").upper()
-        attrs = {"refunded_amount": refunded, "status": "refunded" if full else "partial_refund", "total": amount,
-                 "currency": cur, "user_email": email}
+        # bookkeeping in the order currency: a charge paid in a converted currency (Adaptive Pricing, e.g. HUF) is scaled back
+        mine = [o for o in (self.store.get("shop:orders") or []) if isinstance(o, dict) and o.get("order") == sid]
+        o_cur, o_total = (mine[0].get("currency") or cur, _cents(mine[0].get("total"))) if mine else (cur, amount)
+        conv = (lambda v: round(v * o_total / amount)) if (o_cur != cur and amount and o_total) else (lambda v: v)
+        attrs = {"refunded_amount": conv(refunded), "status": "refunded" if full else "partial_refund", "total": conv(amount),
+                 "currency": o_cur, "user_email": email}
         result = self._order_refunded(sid, attrs, not live)
         # owner: a refund needs a corrective (storno) invoice for the manually issued invoice
         tag = "" if live else "[TESZT] "
