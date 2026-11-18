@@ -51,7 +51,7 @@ LIMITED_PREFIXES = ("/v1/diagnose", "/v1/vision-diagnose", "/v1/chat", "/v1/smar
                     "/v1/interest", "/v1/admin/login")
 ENDPOINTS = ["/health", "/v1/register", "/v1/quota", "/v1/diagnose", "/v1/diagnose/stream", "/v1/smart-diagnose",
              "/v1/smart-diagnose/stream", "/v1/vision-diagnose", "/v1/chat", "/v1/chat/stream", "/v1/metrics", "/v1/report",
-             "/v1/license/activate", "/v1/license/refresh", "/v1/license/deactivate", "/v1/shop/stripe/checkout", "/v1/shop/stripe/webhook", "/v1/shop/lemonsqueezy/webhook", "/v1/shop/download",
+             "/v1/license/activate", "/v1/license/refresh", "/v1/license/deactivate", "/v1/shop/stripe/checkout", "/v1/shop/stripe/confirm", "/v1/shop/stripe/webhook", "/v1/shop/lemonsqueezy/webhook", "/v1/shop/download",
              "/v1/shop/download-link", "/v1/shop/resend", "/v1/interest", "/v1/app/update"]
 # Browser access for the website forms only (the apps are not browsers and are unaffected). Empty = no CORS at all.
 CORS_ORIGINS = [o.strip().rstrip("/") for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
@@ -566,18 +566,53 @@ class StripeCheckoutRequest(BaseModel):
 def stripe_checkout(req: StripeCheckoutRequest, request: Request):
     """Website buy button → hosted Stripe Checkout (one-time payment). Returns {"url"} to redirect the browser to."""
     try:
-        return SHOP.stripe_checkout(req.product, req.lang, req.consent is True, request.headers.get("origin", ""))
+        r = SHOP.stripe_checkout(req.product, req.lang, req.consent is True, request.headers.get("origin", ""))
+        _reconcile_soon()
+        return r
     except licensing_mod.LicenseError as exc:
         raise _lic_error(exc) from None
+
+
+def _reconcile_soon(force=False):
+    """Safety net in the background (never delays a request): paid Stripe sessions without licence / licence e-mail."""
+    import threading
+
+    def run():
+        try:
+            SHOP.reconcile_stripe(force=force)
+        except Exception:  # noqa: BLE001 - a background check must never crash the server
+            logger.exception("Stripe reconcile failed")
+    threading.Thread(target=run, daemon=True).start()
+
+
+if os.getenv("STRIPE_SECRET_KEY", "").strip():
+    _reconcile_soon()                  # at every (re)start / wake-up of a sleeping free instance: re-check the last 7 days
+
+
+class StripeConfirmRequest(BaseModel):
+    session_id: str = Field(min_length=10, max_length=260)
+
+
+@app.post("/v1/shop/stripe/confirm")
+def stripe_confirm(req: StripeConfirmRequest):
+    """Thank-you page: fulfils the paid session right away (webhook-independent). Status only."""
+    try:
+        r = SHOP.stripe_confirm(req.session_id)
+    except licensing_mod.LicenseError as exc:
+        raise _lic_error(exc) from None
+    _reconcile_soon()
+    return r
 
 
 @app.post("/v1/shop/stripe/webhook")
 async def stripe_webhook(request: Request):
     raw = await request.body()
     try:
-        return SHOP.handle_stripe_webhook(raw, request.headers.get("stripe-signature", ""))
+        r = SHOP.handle_stripe_webhook(raw, request.headers.get("stripe-signature", ""))
     except licensing_mod.LicenseError as exc:
         raise _lic_error(exc) from None
+    _reconcile_soon()
+    return r
 
 
 @app.post("/v1/shop/lemonsqueezy/webhook")
@@ -848,11 +883,18 @@ def admin_dashboard(mode: str = "live", x_admin_token: Optional[str] = Header(de
                        "download_bucket": s3presign.configured(), "lease_signing": LICENSES.lease.available,
                        "mail_health": mailer_mod.health(STORE),
                        "lemonsqueezy_map": bool(shop_mod.product_map()), "webhook_secret": bool(os.getenv("LEMONSQUEEZY_WEBHOOK_SECRET", "").strip()),
-                       "stripe": SHOP.stripe_status(),
+                       "stripe": {**SHOP.stripe_status(), "reconcile_last": SHOP.store.get("shop:reconcile:last"),
+                                  "owner_mails_pending": len(SHOP.store.get("mail:owner_pending") or [])},
                        "cors_origins": CORS_ORIGINS, "admin_2fa": ADMIN_AUTH.configured,
                        "header_token_enabled": os.getenv("ADMIN_HEADER_TOKEN", "1").strip() != "0", "store": STORE.kind},
             "outbox": list(reversed(outbox if isinstance(outbox, list) else []))[:30], "audit": ADMIN_AUTH.audit_log()[:40],
             "mail": {**mailer_mod.stats(MAILER.store, MAILER), **SHOP.mail_lists()}}
+
+
+@app.post("/v1/admin/shop/reconcile")
+def admin_shop_reconcile(x_admin_token: Optional[str] = Header(default=None), request: Request = None):
+    _admin(x_admin_token, request)
+    return SHOP.reconcile_stripe(force=True)
 
 
 @app.post("/v1/admin/mail/queue/process")

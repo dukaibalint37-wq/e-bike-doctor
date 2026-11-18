@@ -174,29 +174,46 @@ class Shop:
         """Licence + download entitlement + ONE purchase e-mail per product of a VERIFIED paid order. Idempotent per
         (order, product): licensing.create returns key=None for an order that already has its licence.
         3.3: the owner gets ONE sale notice per order with the buyer's invoicing data (manual invoicing)."""
-        issued, sold = [], []
+        issued, sold, recovered = [], [], []
+        md = "test" if test_mode else "live"
         for prod in products:
             key, rec = self.licenses.create(prod, email=email, name=name, test=test_mode, source=source, order_id=order_id)
-            if key is None:          # already issued for this order (retry)
-                continue
-            month = time.strftime("%Y%m", time.gmtime(self.clock()))
-            md = "test" if test_mode else "live"
-            self.store.incr(f"shop:sales:{month}:{prod}:{md}", 800 * 86_400)
-            self.store.incr(f"shop:revenue_cents:{month}:{money['currency'] or 'EUR'}:{md}", 800 * 86_400, money["total"])
-            if money["tax"]:
-                self.store.incr(f"shop:tax_cents:{month}:{money['currency'] or 'EUR'}:{md}", 800 * 86_400, money["tax"])
-            issued.append(rec["lid"])
-            state = self._send_once("purchase", rec["lid"], prod, lang, email, order_id, test_mode, key=key, name=name)
-            self._log_order({"t": int(self.clock()), "order": order_id, "product": prod, "mode": md, **money, "lid": rec["lid"],
+            lid = rec["lid"]
+            if key is not None:
+                issued.append(lid)
+            # crash-safe (3.3): every step below is guarded by its own marker, so a retry after an interruption (server
+            # asleep / timeout / restart between the steps) completes what is missing and never repeats what is done
+            if self.store.incr(f"shop:booked:{order_id}:{prod}", 800 * 86_400) == 1:
+                month = time.strftime("%Y%m", time.gmtime(self.clock()))
+                self.store.incr(f"shop:sales:{month}:{prod}:{md}", 800 * 86_400)
+                self.store.incr(f"shop:revenue_cents:{month}:{money['currency'] or 'EUR'}:{md}", 800 * 86_400, money["total"])
+                if money["tax"]:
+                    self.store.incr(f"shop:tax_cents:{month}:{money['currency'] or 'EUR'}:{md}", 800 * 86_400, money["tax"])
+            if self.store.get(f"mail:once:purchase:{lid}"):
+                if not any(o.get("lid") == lid for o in self.orders()):   # attempt started but its result was never recorded
+                    self._log_order({"t": int(self.clock()), "order": order_id, "product": prod, "mode": md, **money, "lid": lid,
+                                     "email": rec.get("email_masked", ""), "lang": lang, "mail_sent": False, "mail_state": "interrupted",
+                                     "refunded": False, "provider": source})
+                    self._mail_list_put("mail:uncertain", {"id": f"purchase-{lid}", "kind": "purchase", "lid": lid, "product": prod, "lang": lang,
+                                                           "order": str(order_id), "test": bool(test_mode), "to_enc": encrypt_key(email, "mailq:" + lid),
+                                                           "to": rec.get("email_masked", ""), "t": int(self.clock()), "attempts": 1, "error": "interrupted"})
+                    self._alert_delivery(order_id, lid, prod, email, "interrupted", test_mode)
+                continue                                       # licence AND its mail attempt already done → a plain retry
+            if key is None:
+                recovered.append(lid)                          # licence existed but its e-mail was never attempted
+                logger.warning("order %s: licence %s existed without a purchase e-mail - completing now", order_id, lid)
+            state = self._send_once("purchase", lid, prod, lang, email, order_id, test_mode, key=key, name=name)
+            self._log_order({"t": int(self.clock()), "order": order_id, "product": prod, "mode": md, **money, "lid": lid,
                              "email": rec.get("email_masked", ""), "lang": lang, "mail_sent": state == "sent", "mail_state": state,
                              "refunded": False, "provider": source})
             if state != "sent":
-                logger.error("order %s: licence %s created, purchase e-mail state=%s", order_id, rec["lid"], state)
-            sold.append((prod, rec["lid"], rec.get("key_hint", ""), state))
+                logger.error("order %s: licence %s created, purchase e-mail state=%s", order_id, lid, state)
+                self._alert_delivery(order_id, lid, prod, email, state, test_mode)
+            sold.append((prod, lid, rec.get("key_hint", ""), state))
         if sold:
             self._notify_owner_sale(order_id, sold, email, name, money, test_mode, lang, source, buyer or {})
         self.process_mail_queue(limit=5)          # opportunistic: queued mails go out as soon as a provider works again
-        return {"ok": True, "licences": issued}
+        return {"ok": True, "licences": issued, **({"recovered": recovered} if recovered else {})}
 
     # ------------------------------------------------------------------ owner notices (3.3: manual invoicing)
     @staticmethod
@@ -214,7 +231,39 @@ class Shop:
         r = self.mailer.send(to, subject, "\n".join(lines), kind="owner", idempotency_key="ebd-" + once_key.replace(":", "-")[:200])
         if not r.get("sent"):
             logger.error("owner notice not delivered (%s): %s", r.get("error", "?"), subject)
+            if not r.get("uncertain"):        # definite failure (provider down / quota): kept and re-sent with the mail queue
+                self._mail_list_put("mail:owner_pending", {"id": once_key, "subject": subject, "text": "\n".join(lines),
+                                                           "t": int(self.clock()), "attempts": 1, "error": r.get("error", "")})
         return "sent" if r.get("sent") else "failed"
+
+    def _retry_owner_mails(self, limit=10):
+        lst = self.store.get("mail:owner_pending") or []
+        lst = lst if isinstance(lst, list) else []
+        to, keep = self.owner_address(), []
+        for i, item in enumerate(lst):
+            if i >= limit or not to or item.get("attempts", 0) >= 50:
+                keep.append(item); continue
+            r = self.mailer.send(to, item["subject"], item["text"], kind="owner-queued", idempotency_key="ebd-" + item["id"].replace(":", "-")[:200])
+            if not r.get("sent") and not r.get("uncertain"):
+                item.update(attempts=item.get("attempts", 0) + 1, error=r.get("error", "")); keep.append(item)
+        if lst:
+            self.store.set("mail:owner_pending", keep, 30 * 86_400)
+
+    def _alert_delivery(self, order_id, lid, prod, email, state, test_mode):
+        """3.3: the owner is told about EVERY licence e-mail that did not certainly reach the buyer."""
+        tag = "[TESZT] " if test_mode else ""
+        why = {"queued": "a levélküldő most nem fogadta el (szolgáltatói hiba / kvóta). Automatikusan újrapróbáljuk, amint működik (sorban áll).",
+               "uncertain": "BIZONYTALAN: a küldés időtúllépéssel vagy szerverhibával zárult – lehet, hogy megérkezett. Automatikusan NEM küldjük újra (nehogy kétszer menjen).",
+               "interrupted": "a feldolgozás a küldés közben megszakadt (szerver-újraindulás / alvás). Lehet, hogy megérkezett – automatikusan NEM küldjük újra.",
+               "no_email": "a vásárlónak nincs érvényes e-mail-címe.", "no_key": "a licenckulcs nem állítható vissza a levélhez.",
+               "gave_up": "14 nap / 30 próbálkozás után sem sikerült elküldeni – automatikusan már nem próbáljuk."}.get(state, state)
+        lines = [f"{tag}A licenclevél NEM biztosan érkezett meg a vásárlóhoz.", "", f"Ok: {why}", "",
+                 f"Rendelés: {order_id}", f"Licenc: {lid} ({prod})", f"Vásárló e-mail: {email or '-'}", "",
+                 "Teendő:",
+                 "- Admin → Levelezés: a sorban álló / bizonytalan levelek; bizonytalan levélnél nézd meg a Resend naplóját, és ha nem ment ki: „Újraküldés”.",
+                 "- Vagy a vásárló a weboldalon az „Elveszett licenckulcs” űrlappal maga is újrakérheti (a vásárlási e-mail-címére megy).",
+                 "", "A licenc maga rendben létrejött és aktiválható; csak a levél kézbesítése kérdéses."]
+        return self._owner_mail(f"owner-delivery:{lid}:{state}", f"{tag}Licenclevél kézbesítése sikertelen ({state}): {lid}", lines)
 
     @staticmethod
     def _amount(cents, cur):
@@ -364,6 +413,11 @@ class Shop:
     def _stripe_reject(self, sid, why):
         logger.error("Stripe session %s NOT fulfilled: %s", sid, why)
         self.store.incr("shop:stripe_rejected", 800 * 86_400)
+        tag = "[TESZT] " if sid.startswith("cs_test_") else ""
+        self._owner_mail(f"owner-rejected:{sid}", f"{tag}Fizetés LICENC NÉLKÜL – kézi ellenőrzés kell: {sid[-12:]}",
+                         [f"{tag}A Stripe-munkamenetet a szerver nem teljesítette automatikusan: {why}.", f"Munkamenet: {sid}", "",
+                          "Teendő: nézd meg a fizetést a Stripe Dashboardon. Ha valódi, kifizetett vásárlás: adj ki licencet az adminban "
+                          "(Licencek → Új licenc) és küldd el a vásárlónak, vagy térítsd vissza a Stripe-ban."])
         return {"ok": True, "ignored": why}
 
     def _stripe_session_paid(self, sid, live):
@@ -423,6 +477,76 @@ class Shop:
                                 mail_templates.lang_of(meta.get("lang")), "stripe", buyer)
         finally:
             self.store.set(lock, 0, 5)
+
+    # ------------------------------------------------------------------ safety nets: nothing paid is ever left without a licence
+    SESSION_RE = re.compile(r"cs_(test|live)_[A-Za-z0-9]{10,250}")
+
+    def stripe_confirm(self, sid):
+        """Thank-you page (Stripe success_url ?session_id=…): wakes a sleeping server and fulfils the paid session at once,
+        independent of the webhook. Idempotent; answers only a status (no personal data)."""
+        sid = (sid or "").strip()
+        if not self.SESSION_RE.fullmatch(sid):
+            raise LicenseError("bad_session", 422, "Invalid session")
+        live = self.mode == "live"
+        if not self.stripe.configured or sid.startswith("cs_live_") != live:
+            return {"status": "pending"}
+        try:
+            r = self._stripe_session_paid(sid, live)
+        except LicenseError as exc:
+            if exc.code in ("busy", "verification_unavailable"):
+                return {"status": "pending"}                 # the webhook / the next reconcile completes it
+            raise
+        ign = str(r.get("ignored", ""))
+        return {"status": "pending" if ign.startswith("not paid") else ("check" if ign else "ok")}
+
+    def reconcile_stripe(self, force=False, days=7):
+        """Re-checks the paid Checkout Sessions of the last `days` days at Stripe and completes every one that has no licence
+        or whose licence e-mail was never attempted (webhook lost, delivered while asleep and given up, wrong secret …).
+        Runs at most every 15 minutes (startup, webhook, checkout, thank-you page, admin); `force` from the admin."""
+        if not self.stripe.configured or self.stripe.mode != self.mode:
+            return {"skipped": "stripe not configured for this shop mode"}
+        if self.store.incr("shop:reconcile:lock", 900) != 1 and not force:     # every run (also a forced one) starts the 15 min window
+            return {"skipped": "ran recently"}
+        live, now = self.mode == "live", int(self.clock())
+        params = {"limit": 100, "status": "complete", "created": {"gte": now - days * 86_400}}
+        checked, fixed, errors = 0, [], 0
+        for _ in range(10):
+            try:
+                page = self.stripe.request("GET", "/checkout/sessions", params)
+            except stripe_pay.StripeError as exc:
+                logger.error("reconcile: Stripe list failed status=%s code=%s", exc.status, exc.code)
+                errors += 1
+                break
+            data = page.get("data") or []
+            for x in data:
+                meta = x.get("metadata") or {}
+                if meta.get("shop") != "ebd-website" or x.get("payment_status") != "paid" or bool(x.get("livemode")) != live:
+                    continue
+                checked += 1
+                sid, prod = str(x.get("id", "")), meta.get("product")
+                lid = self.store.get(f"lic:order:{sid}:{prod}")
+                if (lid and self.store.get(f"mail:once:purchase:{lid}")) or self.store.get(f"mail:once:owner-rejected:{sid}"):
+                    continue                                   # complete already / already reported to the owner
+                try:
+                    r = self._stripe_session_paid(sid, live)
+                except LicenseError:
+                    errors += 1
+                    continue
+                if r.get("licences") or r.get("recovered"):
+                    fixed.append(sid)
+                    tag = "" if live else "[TESZT] "
+                    self._owner_mail(f"owner-reconciled:{sid}", f"{tag}Pótolt licenc (a webhook nem érkezett meg): {sid[-12:]}",
+                                     [f"{tag}Egy kifizetett vásárlás licencét / licenclevelét az automatikus egyeztetés pótolta.",
+                                      f"Munkamenet: {sid}", "Licenc: " + ", ".join(r.get("licences") or r.get("recovered") or []), "",
+                                      "Nincs teendő; érdemes a Stripe Dashboardon (Developers → Webhooks) megnézni, miért nem ment át a webhook."])
+            if not page.get("has_more") or not data:
+                break
+            params["starting_after"] = data[-1]["id"]
+        result = {"t": now, "checked": checked, "fixed": len(fixed), "errors": errors}
+        self.store.set("shop:reconcile:last", result, 30 * 86_400)
+        if fixed:
+            logger.warning("reconcile: completed %d paid session(s) without webhook: %s", len(fixed), fixed)
+        return result
 
     def _stripe_refunded(self, charge, live):
         pi = charge.get("payment_intent")
@@ -549,11 +673,19 @@ class Shop:
         """Re-sends DEFINITELY failed mails (quota reached, provider down/refused). Never touches 'uncertain' items."""
         lst = self.store.get("mail:queue") or []
         lst = lst if isinstance(lst, list) else []
-        if not lst or not self.mailer.configured:
+        if not self.mailer.configured:
             return {"processed": 0, "sent": 0, "left": len(lst)}
+        self._retry_owner_mails()
+        if not lst:
+            return {"processed": 0, "sent": 0, "left": 0}
         keep, sent, done = [], 0, 0
         for item in lst:
-            if done >= limit or item.get("attempts", 0) >= 30 or self.clock() - item.get("t", 0) > 14 * 86_400:
+            if item.get("attempts", 0) >= 30 or self.clock() - item.get("t", 0) > 14 * 86_400:
+                if item.get("kind") == "purchase" and not item.get("gave_up"):
+                    item["gave_up"] = True
+                    self._alert_delivery(item.get("order", ""), item["lid"], item.get("product", ""), item.get("to", ""), "gave_up", item.get("test"))
+                keep.append(item); continue
+            if done >= limit:
                 keep.append(item); continue
             done += 1
             email = decrypt_key(item.get("to_enc", ""), "mailq:" + item["lid"])
@@ -566,6 +698,8 @@ class Shop:
                 sent += 1
                 if item["kind"] == "purchase":
                     self._mark_order_mail(item["lid"], "sent")
+                    self._owner_mail(f"owner-delivered:{item['lid']}", ("[TESZT] " if item.get("test") else "") + f"Licenclevél utólag kézbesítve: {item['lid']}",
+                                     [f"A korábban sikertelen licenclevél most kiment ({item['lid']}, rendelés {item.get('order', '')}). Nincs teendő."])
             elif r.get("uncertain"):
                 item.update(error=r.get("error", ""), attempts=item.get("attempts", 0) + 1)
                 self._mail_list_put("mail:uncertain", item)
@@ -711,7 +845,8 @@ class Shop:
     # ------------------------------------------------------------------ orders log / test-data separation (3.2)
     def _log_order(self, entry):
         orders = self.store.get("shop:orders") or []
-        orders = (orders if isinstance(orders, list) else [])[-499:] + [entry]
+        orders = [o for o in (orders if isinstance(orders, list) else [])
+                  if not (o.get("order") == entry.get("order") and o.get("product") == entry.get("product"))][-499:] + [entry]
         self.store.set("shop:orders", orders, 800 * 86_400)
 
     def orders(self, mode=None):

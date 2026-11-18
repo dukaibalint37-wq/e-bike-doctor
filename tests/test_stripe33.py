@@ -22,6 +22,8 @@ class FakeStripe(SP.StripeClient):
             raise self.fail
         if method == "POST" and url.endswith("/checkout/sessions"):
             return 200, json.dumps({"id": "cs_test_new", "url": "https://checkout.stripe.com/c/pay/cs_test_new"})
+        if method == "GET" and "/checkout/sessions?" in url:          # list (reconcile)
+            return 200, json.dumps({"data": [s for s in self.sessions.values() if s.get("status") == "complete"], "has_more": False})
         sid = url.rsplit("/", 1)[-1]
         if sid in self.sessions:
             return 200, json.dumps(self.sessions[sid])
@@ -402,6 +404,106 @@ class RefundTest(StripeBase):
         c = dict(self.charge(1999, True), payment_intent="pi_other")
         self.assertEqual(self.deliver(c, etype="charge.refunded", ev_id="evt_u")["ignored"], "unknown payment")
         self.assertEqual(self.lic.get(self.lid)["status"], "active")
+
+
+class NoLossTest(StripeBase):
+    """3.3: a sleeping / restarting free Render instance and Stripe's retries can never lose a paid licence or its e-mail;
+    every uncertain delivery is reported to the owner."""
+    def owner_subjects(self):
+        return [m["subject"] for m in self.owner_mails()]
+
+    def test_crash_after_licence_before_mail_is_completed_by_the_retry(self):
+        self.stripe.sessions["cs_test_1"] = session()
+        key, rec = self.lic.create("EBD-WIN", email="vevo@example.com", test=True, source="stripe", order_id="cs_test_1")  # then: crash
+        r = self.deliver({"id": "cs_test_1"})                                   # Stripe retry after the wake-up
+        self.assertEqual((r["licences"], r["recovered"]), ([], [rec["lid"]]))
+        self.assertEqual(len(self.licence_mails()), 1)                          # the mail goes out now - exactly once
+        mailed = re.search(r"EBDW-[0-9A-Z]{5}-[0-9A-Z]{5}-[0-9A-Z]{5}-[0-9A-Z]{5}", self.licence_mails()[0]["payload"]["text"]).group(0)
+        self.assertEqual((mailed, self.lic.find_by_key(mailed)["lid"]), (key, rec["lid"]))   # the original key, recovered
+        self.assertEqual(len([o for o in self.shop.orders() if o["order"] == "cs_test_1"]), 1)
+        self.assertTrue(any("Új vásárlás" in x for x in self.owner_subjects()))
+        self.assertTrue(self.deliver({"id": "cs_test_1"}, ev_id="evt_9")["licences"] == [])   # later retries: nothing more
+        self.assertEqual(len(self.licence_mails()), 1)
+
+    def test_crash_during_mail_send_is_reported_never_duplicated(self):
+        self.stripe.sessions["cs_test_1"] = session()
+        key, rec = self.lic.create("EBD-WIN", email="vevo@example.com", test=True, source="stripe", order_id="cs_test_1")
+        self.store.incr(f"mail:once:purchase:{rec['lid']}", 100)              # send started, result never recorded
+        self.deliver({"id": "cs_test_1"})
+        self.assertEqual(self.licence_mails(), [])                              # no blind second send
+        self.assertTrue(any("kézbesítése sikertelen (interrupted)" in x for x in self.owner_subjects()))
+        self.assertEqual(self.shop.mail_lists()["uncertain"][0]["lid"], rec["lid"])   # owner can re-send it with one click
+        self.assertEqual(self.shop.orders()[0]["mail_state"], "interrupted")
+
+    def test_mail_provider_down_alerts_owner_and_delivers_later(self):
+        self.stripe.sessions["cs_test_1"] = session()
+        self.mail.status = 422                                                  # provider refuses everything (also the owner notice)
+        r = self.deliver({"id": "cs_test_1"})
+        self.assertEqual(len(r["licences"]), 1)                                 # licence exists regardless
+        self.assertEqual(self.shop.orders()[0]["mail_state"], "queued")
+        pending = self.store.get("mail:owner_pending")
+        self.assertTrue(any("kézbesítése sikertelen (queued)" in x["subject"] for x in pending))   # the alert is kept, not lost
+        self.mail.status = 200; self.mail.calls.clear()                         # provider works again
+        self.shop.process_mail_queue()
+        self.assertEqual(len(self.licence_mails()), 1)
+        subj = self.owner_subjects()
+        self.assertTrue(any("kézbesítése sikertelen (queued)" in x for x in subj), subj)
+        self.assertTrue(any("utólag kézbesítve" in x for x in subj), subj)
+        self.assertEqual(self.store.get("mail:owner_pending"), [])
+        self.assertEqual(self.shop.orders()[0]["mail_state"], "sent")
+
+    def test_uncertain_send_alerts_owner(self):
+        self.stripe.sessions["cs_test_1"] = session()
+        self.mail.status = 503                                                  # 5xx after sending: delivery uncertain
+        self.deliver({"id": "cs_test_1"})
+        self.mail.status = 200
+        self.assertIn(self.shop.orders()[0]["mail_state"], ("uncertain", "queued"))
+        self.shop.process_mail_queue()
+        self.assertTrue(any("kézbesítése sikertelen" in x for x in self.owner_subjects()))
+
+    def test_queue_gives_up_after_14_days_and_tells_the_owner(self):
+        self.stripe.sessions["cs_test_1"] = session()
+        self.mail.status = 422
+        self.deliver({"id": "cs_test_1"})
+        self.clock.t += 15 * 86_400
+        self.mail.status = 200
+        self.shop.process_mail_queue(); self.shop.process_mail_queue()
+        self.assertEqual(len([x for x in self.owner_subjects() if "(gave_up)" in x]), 1)
+
+    def test_rejected_paid_session_is_never_silent(self):
+        self.stripe.sessions["cs_test_bad"] = session(sid="cs_test_bad", amount=100)
+        self.deliver({"id": "cs_test_bad"})
+        self.assertTrue(any("LICENC NÉLKÜL" in x for x in self.owner_subjects()))
+
+    def test_lost_webhook_reconcile_issues_the_licence_once(self):
+        self.stripe.sessions["cs_test_1"] = session()                           # paid, but no webhook ever arrived
+        self.stripe.sessions["cs_test_open"] = session(sid="cs_test_open", paid=False)
+        self.stripe.sessions["cs_test_other"] = dict(session(sid="cs_test_other"), metadata={"product": "EBD-WIN", "shop": "other"})
+        r = self.shop.reconcile_stripe(force=True)
+        self.assertEqual((r["checked"], r["fixed"]), (1, 1))
+        self.assertEqual(len(self.licence_mails()), 1)
+        self.assertTrue(any("Pótolt licenc" in x for x in self.owner_subjects()))
+        self.assertEqual(self.shop.reconcile_stripe(force=True)["fixed"], 0)    # second run: nothing to do
+        self.assertEqual(self.shop.reconcile_stripe()["skipped"], "ran recently")
+        self.assertEqual(self.deliver({"id": "cs_test_1"})["licences"], [])     # a very late webhook: no duplicate
+        self.assertEqual(len(self.licence_mails()), 1)
+
+    def test_reconcile_needs_matching_key_mode(self):
+        self.shop.stripe = FakeStripe("sk_live_x")                              # SHOP_MODE=test
+        self.assertIn("skipped", self.shop.reconcile_stripe(force=True))
+
+    def test_thank_you_page_confirm(self):
+        self.stripe.sessions["cs_test_1234567890"] = session(sid="cs_test_1234567890")
+        self.assertEqual(self.shop.stripe_confirm("cs_test_1234567890"), {"status": "ok"})
+        self.assertEqual(len(self.licence_mails()), 1)
+        self.assertEqual(self.shop.stripe_confirm("cs_test_1234567890"), {"status": "ok"})   # repeat: idempotent
+        self.assertEqual(len(self.licence_mails()), 1)
+        self.stripe.sessions["cs_test_unpaid0001"] = session(sid="cs_test_unpaid0001", paid=False)
+        self.assertEqual(self.shop.stripe_confirm("cs_test_unpaid0001"), {"status": "pending"})
+        self.assertEqual(self.shop.stripe_confirm("cs_live_1234567890"), {"status": "pending"})  # other mode: ignored
+        self.assertEqual(self.shop.stripe_confirm("cs_test_missing0001"), {"status": "pending"})  # Stripe 404 → retry later
+        with self.assertRaises(S.LicenseError):
+            self.shop.stripe_confirm("../../etc")
 
 
 if __name__ == "__main__":
