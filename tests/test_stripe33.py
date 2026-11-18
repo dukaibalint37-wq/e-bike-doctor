@@ -32,7 +32,10 @@ def session(sid="cs_test_1", product="EBD-WIN", lang="hu", paid=True, live=False
             mode="payment", pi="pi_1"):
     return {"id": sid, "object": "checkout.session", "mode": mode, "status": "complete" if paid else "open",
             "payment_status": "paid" if paid else "unpaid", "livemode": live, "amount_subtotal": amount, "amount_total": amount,
-            "currency": currency, "customer_details": {"email": email, "name": "Vevő Béla"}, "payment_intent": pi,
+            "currency": currency, "payment_intent": pi,
+            "customer_details": {"email": email, "name": "Vevő Béla", "address": {"line1": "Fő utca 1.", "line2": None, "postal_code": "1011",
+                                                                               "city": "Budapest", "state": None, "country": "HU"},
+                                 "tax_ids": [{"type": "eu_vat", "value": "HU12345678"}]},
             "total_details": {"amount_tax": 0, "amount_discount": 0}, "metadata": {"product": product, "lang": lang, "shop": "ebd-website"}}
 
 
@@ -48,10 +51,11 @@ class StripeBase(Base):
     def setUp(self):
         super().setUp()
         self._s_saved = {k: os.environ.get(k) for k in ("STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_MAP", "STRIPE_SECRET_KEY", "SITE_URL",
-                                                         "STRIPE_PUBLISHABLE_KEY", "SHOP_ACCEPT_TEST_ORDERS")}
+                                                         "STRIPE_PUBLISHABLE_KEY", "SHOP_ACCEPT_TEST_ORDERS", "OWNER_NOTIFY_EMAIL", "MAIL_REPLY_TO")}
         for k in self._s_saved:
             os.environ.pop(k, None)
         os.environ["STRIPE_WEBHOOK_SECRET"] = WHSEC
+        os.environ["OWNER_NOTIFY_EMAIL"] = "owner@example.com"
         self.stripe = FakeStripe()
         self.shop = S.Shop(self.store, self.lic, self.mail, clock=self.clock, stripe=self.stripe)
 
@@ -63,6 +67,9 @@ class StripeBase(Base):
     def deliver(self, obj, etype="checkout.session.completed", ev_id="evt_1", live=False):
         raw = event(obj, etype, ev_id, live)
         return self.shop.handle_stripe_webhook(raw, sig(raw, self.clock()))
+
+    def owner_mails(self):
+        return [c["payload"] for c in self.mail.calls if c["payload"].get("to") == ["owner@example.com"]]
 
     def licence_mails(self):
         return [c for c in self.mail.calls if "EBD" in c["payload"].get("text", "") and "?t=" in c["payload"].get("text", "")]
@@ -107,6 +114,8 @@ class CheckoutTest(StripeBase):
         self.assertEqual(q["payment_intent_data[metadata][product]"], "EBD-WIN")
         self.assertTrue(q["metadata[withdrawal_waiver]"].startswith("accepted 20"))
         self.assertEqual(q["success_url"], "https://ebikedoctorpro.com/de/danke/?session_id={CHECKOUT_SESSION_ID}")
+        # manual invoicing: full billing address required, tax ID offered, Customer kept in Stripe
+        self.assertEqual((q["billing_address_collection"], q["tax_id_collection[enabled]"], q["customer_creation"]), ("required", "true", "always"))
         self.assertEqual(q["cancel_url"], "https://ebikedoctorpro.com/de/shop/")
         self.shop.stripe_checkout("android", "hu", True)
         q = {k: v[0] for k, v in urllib.parse.parse_qs(self.stripe.calls[-1]["body"]).items()}
@@ -256,6 +265,43 @@ class WebhookTest(StripeBase):
         self.assertEqual(len([c for c in self.stripe.calls if c["method"] == "GET"]), 0)            # nothing verified/issued
 
 
+class OwnerNoticeTest(StripeBase):
+    def test_one_sale_notice_with_invoicing_data_and_no_licence_key(self):
+        self.stripe.sessions["cs_test_1"] = session(lang="de")
+        self.deliver({"id": "cs_test_1"})
+        self.deliver({"id": "cs_test_1"}, etype="checkout.session.async_payment_succeeded", ev_id="evt_2")   # second event: no 2nd notice
+        mails = self.owner_mails()
+        self.assertEqual(len(mails), 1)
+        m = mails[0]
+        self.assertTrue(m["subject"].startswith("[TESZT] Új vásárlás:")); self.assertIn("19.99 EUR", m["subject"])
+        for x in ("Vevő Béla", "vevo@example.com", "Fő utca 1., 1011, Budapest, HU", "HU12345678 (eu_vat)", "cs_test_1", "pi_1",
+                  "https://dashboard.stripe.com/test/payments/pi_1", "Vásárló nyelve: de", "licenclevél: sent", "TESZTVÁSÁRLÁS"):
+            self.assertIn(x, m["text"], x)
+        key = re.search(r"EBDW-[0-9A-Z-]{23}", self.licence_mails()[0]["payload"]["text"]).group(0)
+        self.assertNotIn(key, m["text"])                                         # never the licence key
+        self.assertNotIn("?t=", m["text"])                                       # nor a download link
+
+    def test_live_notice_asks_for_invoice_and_private_buyer_without_tax_id(self):
+        os.environ["SHOP_MODE"] = "live"; self.shop.stripe = FakeStripe("sk_live_1"); self.stripe = self.shop.stripe
+        s = session(live=True, pi="pi_9"); s["customer_details"].pop("tax_ids")
+        self.stripe.sessions["cs_test_1"] = s
+        self.deliver({"id": "cs_test_1"}, live=True)
+        m = self.owner_mails()[0]
+        self.assertTrue(m["subject"].endswith("számla kiállítandó")); self.assertNotIn("TESZT", m["subject"])
+        self.assertIn("Adószám: - (magánszemély)", m["text"]); self.assertIn("https://dashboard.stripe.com/payments/pi_9", m["text"])
+
+    def test_fallback_to_reply_to_and_missing_address_never_breaks_the_purchase(self):
+        os.environ.pop("OWNER_NOTIFY_EMAIL"); os.environ["MAIL_REPLY_TO"] = "reply@example.com"
+        self.stripe.sessions["cs_test_1"] = session()
+        self.deliver({"id": "cs_test_1"})
+        self.assertTrue(any(c["payload"]["to"] == ["reply@example.com"] for c in self.mail.calls))
+        os.environ.pop("MAIL_REPLY_TO")
+        self.stripe.sessions["cs_test_2"] = session(sid="cs_test_2", pi="pi_2")
+        r = self.deliver({"id": "cs_test_2"}, ev_id="evt_x")
+        self.assertEqual(len(r["licences"]), 1)                                  # licence + buyer mail still fine
+        self.assertEqual(len(self.licence_mails()), 2)
+
+
 class RefundTest(StripeBase):
     def setUp(self):
         super().setUp()
@@ -271,15 +317,42 @@ class RefundTest(StripeBase):
         self.assertTrue(r["partial_refund"]); self.assertEqual(self.lic.get(self.lid)["status"], "active")
         r = self.deliver(self.charge(1999, True), etype="charge.refunded", ev_id="evt_f")
         self.assertEqual(r["revoked"], [self.lid]); self.assertEqual(self.lic.get(self.lid)["status"], "revoked")
-        notice = self.mail.calls[-1]["payload"]
+        notice = [c["payload"] for c in self.mail.calls if c["payload"]["to"] == ["vevo@example.com"]][-1]   # buyer notice
         self.assertIn("refunded", notice["subject"].lower() + notice["text"].lower()); self.assertIn("Stripe", notice["text"])
         self.assertNotIn("Lemon", notice["text"])
         self.assertEqual(self.shop.orders()[0]["refunded_cents"], 1999)
         self.assertTrue(self.deliver(self.charge(1999, True), etype="charge.refunded", ev_id="evt_f")["duplicate"])
 
+    def test_refunds_notify_the_owner_for_the_storno_invoice(self):
+        self.deliver(self.charge(500, False), etype="charge.refunded", ev_id="evt_p")
+        self.deliver(self.charge(1999, True), etype="charge.refunded", ev_id="evt_f")
+        subj = [m["subject"] for m in self.owner_mails()]
+        self.assertTrue(any("Részleges visszatérítés: 5.00 EUR" in x for x in subj), subj)
+        full = [m for m in self.owner_mails() if "TELJES" in m["subject"]][0]
+        self.assertIn("Licenc visszavonva: " + self.lid, full["text"]); self.assertIn("19.99 EUR / 19.99 EUR", full["text"])
+
+    def test_failed_refund_and_chargebacks(self):
+        self.deliver(self.charge(1999, True), etype="charge.refunded", ev_id="evt_f")
+        r = self.deliver({"id": "re_1", "object": "refund", "status": "failed", "failure_reason": "expired_or_canceled_card", "amount": 1999,
+                          "currency": "eur", "payment_intent": "pi_1"}, etype="charge.refund.updated", ev_id="evt_rf")
+        self.assertTrue(r["refund_failed"])
+        self.assertIn("SIKERTELEN visszatérítés (failed)", self.owner_mails()[-1]["subject"])
+        self.assertEqual(self.deliver({"id": "re_2", "status": "succeeded", "payment_intent": "pi_1"}, etype="charge.refund.updated",
+                                      ev_id="evt_rs")["ignored"], "refund succeeded")
+
+    def test_dispute_opened_keeps_licence_lost_revokes(self):
+        d = {"id": "dp_1", "object": "dispute", "amount": 1999, "currency": "eur", "payment_intent": "pi_1", "reason": "fraudulent"}
+        self.deliver(dict(d, status="needs_response"), etype="charge.dispute.created", ev_id="evt_d1")
+        self.assertEqual(self.lic.get(self.lid)["status"], "active")
+        self.assertIn("Chargeback (needs_response)", self.owner_mails()[-1]["subject"])
+        r = self.deliver(dict(d, status="lost"), etype="charge.dispute.closed", ev_id="evt_d2")
+        self.assertEqual(r["revoked"], [self.lid]); self.assertEqual(self.lic.get(self.lid)["status"], "revoked")
+        self.assertIn("sztornó", self.owner_mails()[-1]["text"])
+
     def test_refund_without_billing_email_reads_the_session(self):
         self.deliver(self.charge(1999, True, email=""), etype="charge.refunded", ev_id="evt_f")
-        self.assertEqual(self.mail.calls[-1]["payload"]["to"], ["vevo@example.com"])
+        self.assertTrue(any("refunded" in c["payload"]["subject"].lower() + c["payload"]["text"].lower()
+                            for c in self.mail.calls if c["payload"]["to"] == ["vevo@example.com"]))
 
     def test_refund_of_unknown_payment_is_ignored(self):
         c = dict(self.charge(1999, True), payment_intent="pi_other")

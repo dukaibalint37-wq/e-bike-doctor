@@ -7,9 +7,24 @@ import http.client
 import gemini_client, quota, cache, metrics, store, ai_core
 
 
+_ORIGINAL_ENV = {}
+
+
 def env(**kw):
+    """Sets variables for this module's tests; the originals come back in tearDownModule (no leak into other test files -
+    e.g. DAILY_AI_LIMIT=2 used to make test_commercial's per-licence quota test fail when this module ran first)."""
     for k, v in kw.items():
+        _ORIGINAL_ENV.setdefault(k, os.environ.get(k))
         os.environ[k] = v
+
+
+def tearDownModule():
+    for k, v in _ORIGINAL_ENV.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    _ORIGINAL_ENV.clear()
 
 
 class GeminiClientTest(unittest.TestCase):

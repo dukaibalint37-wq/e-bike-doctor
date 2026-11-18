@@ -7,7 +7,10 @@ Stripe Checkout (3.3, primary): one-time payments (mode=payment, never a subscri
 - POST /v1/shop/stripe/webhook: Stripe-Signature verified with STRIPE_WEBHOOK_SECRET (timestamp tolerance, constant time).
   checkout.session.completed / .async_payment_succeeded → the session is RE-READ from the Stripe API and a licence is
   issued only when it is paid, a one-time payment, in the expected mode and for a known product (else nothing is issued);
-  charge.refunded (full) → licence revoked; partial refund → recorded only.
+  charge.refunded (full) → licence revoked; partial refund → recorded only; charge.refund.updated (failed/canceled) and
+  charge.dispute.created/.closed → owner notice (a LOST dispute revokes like a full refund).
+- Manual invoicing: Checkout requires the billing address (and offers a tax ID field); the owner (OWNER_NOTIFY_EMAIL, else
+  MAIL_REPLY_TO) gets one notice per sale with the invoicing data and one per refund (storno invoice).
 - Duplicates: every event id is processed once, a per-session lock stops concurrent deliveries, and licensing.create is
   idempotent per (session, product) → never two licences or two licence e-mails for one payment.
 
@@ -167,10 +170,11 @@ class Shop:
         return self._fulfil(order_id, products, attrs.get("user_email", ""), attrs.get("user_name", ""), order_money(attrs),
                             test_mode, lang, "lemonsqueezy")
 
-    def _fulfil(self, order_id, products, email, name, money, test_mode, lang, source):
+    def _fulfil(self, order_id, products, email, name, money, test_mode, lang, source, buyer=None):
         """Licence + download entitlement + ONE purchase e-mail per product of a VERIFIED paid order. Idempotent per
-        (order, product): licensing.create returns key=None for an order that already has its licence."""
-        issued = []
+        (order, product): licensing.create returns key=None for an order that already has its licence.
+        3.3: the owner gets ONE sale notice per order with the buyer's invoicing data (manual invoicing)."""
+        issued, sold = [], []
         for prod in products:
             key, rec = self.licenses.create(prod, email=email, name=name, test=test_mode, source=source, order_id=order_id)
             if key is None:          # already issued for this order (retry)
@@ -188,8 +192,63 @@ class Shop:
                              "refunded": False, "provider": source})
             if state != "sent":
                 logger.error("order %s: licence %s created, purchase e-mail state=%s", order_id, rec["lid"], state)
+            sold.append((prod, rec["lid"], rec.get("key_hint", ""), state))
+        if sold:
+            self._notify_owner_sale(order_id, sold, email, name, money, test_mode, lang, source, buyer or {})
         self.process_mail_queue(limit=5)          # opportunistic: queued mails go out as soon as a provider works again
         return {"ok": True, "licences": issued}
+
+    # ------------------------------------------------------------------ owner notices (3.3: manual invoicing)
+    @staticmethod
+    def owner_address():
+        return (os.getenv("OWNER_NOTIFY_EMAIL", "").strip() or os.getenv("MAIL_REPLY_TO", "").strip())
+
+    def _owner_mail(self, once_key, subject, lines):
+        """Owner notice: at most once per event (never blocks or fails a webhook); text only, never a licence key."""
+        to = self.owner_address()
+        if not to or not EMAIL_RE.fullmatch(to):
+            logger.warning("owner notice not sent (OWNER_NOTIFY_EMAIL / MAIL_REPLY_TO missing): %s", subject)
+            return "no_owner_address"
+        if self.store.incr("mail:once:" + once_key, 800 * 86_400) != 1:
+            return "duplicate_blocked"
+        r = self.mailer.send(to, subject, "\n".join(lines), kind="owner", idempotency_key="ebd-" + once_key.replace(":", "-")[:200])
+        if not r.get("sent"):
+            logger.error("owner notice not delivered (%s): %s", r.get("error", "?"), subject)
+        return "sent" if r.get("sent") else "failed"
+
+    @staticmethod
+    def _amount(cents, cur):
+        return f"{cents / 100:.2f} {cur}".strip()
+
+    def _notify_owner_sale(self, order_id, sold, email, name, money, test_mode, lang, source, buyer):
+        cur = money.get("currency") or "EUR"
+        names = ", ".join(mail_templates.NAMES[p]["hu"] for p, _, _, _ in sold)
+        tag = "[TESZT] " if test_mode else ""
+        addr = buyer.get("address") or {}
+        addr_line = ", ".join(str(addr.get(k)) for k in ("line1", "line2", "postal_code", "city", "state", "country") if addr.get(k))
+        tax_ids = ", ".join(f"{t.get('value', '')} ({t.get('type', '')})" for t in (buyer.get("tax_ids") or []) if isinstance(t, dict))
+        pi = buyer.get("payment_intent") or ""
+        dash = (f"https://dashboard.stripe.com/{'test/' if test_mode else ''}payments/{pi}" if source == "stripe" and pi else "")
+        lines = ([tag + "TESZTVÁSÁRLÁS – nem valódi fizetés, számlát NEM kell kiállítani.", ""] if test_mode else
+                 ["Új sikeres vásárlás. A számlát kézzel kell kiállítani és e-mailben elküldeni a vásárlónak.", ""])
+        lines += [f"Termék: {names}",
+                  f"Fizetett összeg (bruttó): {self._amount(money.get('total', 0), cur)}"
+                  + (f" · ebből adó: {self._amount(money['tax'], cur)}" if money.get("tax") else "")
+                  + (f" · kedvezmény: {self._amount(money['discount'], cur)}" if money.get("discount") else ""),
+                  f"Időpont: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(self.clock()))}",
+                  f"Fizetési szolgáltató: {source} · rendelés/munkamenet: {order_id}" + (f" · fizetés: {pi}" if pi else ""),
+                  "", "SZÁMLÁZÁSI ADATOK",
+                  f"Név: {buyer.get('name') or name or '-'}"]
+        if buyer.get("business_name"):
+            lines.append(f"Cégnév: {buyer['business_name']}")
+        lines += [f"E-mail: {email}", f"Számlázási cím: {addr_line or '-'}", f"Adószám: {tax_ids or '- (magánszemély)'}",
+                  f"Vásárló nyelve: {lang or 'en'}", "", "LICENC"]
+        lines += [f"{lid} · {p} · kulcs vége …{hint} · licenclevél: {st}" for p, lid, hint, st in sold]
+        if dash:
+            lines += ["", "Stripe: " + dash]
+        lines += ["", "(Automatikus értesítés – a licenckulcsot ez a levél nem tartalmazza.)"]
+        subject = f"{tag}Új vásárlás: {names} – {self._amount(money.get('total', 0), cur)}" + ("" if test_mode else " – számla kiállítandó")
+        return self._owner_mail(f"owner-sale:{order_id}", subject, lines)
 
     # ------------------------------------------------------------------ Stripe Checkout (3.3)
     def stripe_status(self):
@@ -227,7 +286,10 @@ class Shop:
             item = {"price_data": {"currency": PRICES[prod][1].lower(), "unit_amount": price_cents(prod), "tax_behavior": "inclusive",
                                    "product_data": {"name": mail_templates.NAMES[prod]["en"], "metadata": {"product": prod}}},
                     "quantity": 1}
+        # manual invoicing (3.3): Stripe asks for the full billing address (name included) and - optionally, for businesses -
+        # the tax ID; a Customer object keeps them in the Stripe dashboard as well
         params = {"mode": "payment", "line_items": [item], "locale": lang, "submit_type": "pay",
+                  "billing_address_collection": "required", "tax_id_collection": {"enabled": True}, "customer_creation": "always",
                   "success_url": mail_templates.site_url(lang, "thanks") + "?session_id={CHECKOUT_SESSION_ID}",
                   "cancel_url": mail_templates.site_url(lang, "shop"),
                   "metadata": meta, "payment_intent_data": {"metadata": meta}}
@@ -273,6 +335,10 @@ class Shop:
             result = self._stripe_session_paid(str(obj.get("id", "")), live)      # raises 503/409 → not marked done, Stripe retries
         elif etype == "charge.refunded":
             result = self._stripe_refunded(obj, live)
+        elif etype == "charge.refund.updated":
+            result = self._stripe_refund_updated(obj, live)
+        elif etype in ("charge.dispute.created", "charge.dispute.closed"):
+            result = self._stripe_dispute(obj, live, etype)
         elif etype == "checkout.session.async_payment_failed":
             logger.warning("Stripe delayed payment failed for session %s - no licence", obj.get("id", ""))
             result = {"ok": True, "ignored": "payment failed"}
@@ -327,8 +393,11 @@ class Shop:
             pi = pi.get("id") if isinstance(pi, dict) else pi
             if pi:
                 self.store.set("shop:stripe_pi:" + str(pi), sid, 800 * 86_400)
+            buyer = {"name": (cd.get("name") or "")[:200], "business_name": (cd.get("business_name") or "")[:200],
+                     "address": cd.get("address") if isinstance(cd.get("address"), dict) else {},
+                     "tax_ids": cd.get("tax_ids") if isinstance(cd.get("tax_ids"), list) else [], "payment_intent": pi or ""}
             return self._fulfil(sid, [prod], email, (cd.get("name") or "")[:120], money, not live,
-                                mail_templates.lang_of(meta.get("lang")), "stripe")
+                                mail_templates.lang_of(meta.get("lang")), "stripe", buyer)
         finally:
             self.store.set(lock, 0, 5)
 
@@ -347,9 +416,58 @@ class Shop:
                 email = ((self.stripe.get_checkout_session(sid).get("customer_details") or {}).get("email") or "").strip()
             except stripe_pay.StripeError:
                 email = ""                 # the licence is still revoked; the notice is then not sent (logged)
+        cur = str(charge.get("currency", "") or "").upper()
         attrs = {"refunded_amount": refunded, "status": "refunded" if full else "partial_refund", "total": amount,
-                 "currency": str(charge.get("currency", "") or "").upper(), "user_email": email}
-        return self._order_refunded(sid, attrs, not live)
+                 "currency": cur, "user_email": email}
+        result = self._order_refunded(sid, attrs, not live)
+        # owner: a refund needs a corrective (storno) invoice for the manually issued invoice
+        tag = "" if live else "[TESZT] "
+        kind = "TELJES visszatérítés" if full else "Részleges visszatérítés"
+        lines = [f"{tag}{kind} történt a Stripe-ban.", "",
+                 f"Visszatérített összeg (összesen): {self._amount(refunded, cur)} / {self._amount(amount, cur)}",
+                 f"Munkamenet: {sid} · fizetés: {pi}", f"Vásárló e-mail: {email or '-'}",
+                 ("Licenc visszavonva: " + (", ".join(result.get("revoked") or []) or "-")) if full
+                 else "A licenc aktív marad (részleges visszatérítés).", "",
+                 "Teendő: helyesbítő (sztornó) számla a kiállított számlához." if live else "Tesztfizetés – nincs számlateendő."]
+        self._owner_mail(f"owner-refund:{sid}:{refunded}", f"{tag}{kind}: {self._amount(refunded, cur)} – {sid[-12:]}", lines)
+        return result
+
+    def _session_of_pi(self, pi):
+        pi = pi.get("id") if isinstance(pi, dict) else pi
+        return (self.store.get("shop:stripe_pi:" + str(pi)) if pi else None), pi
+
+    def _stripe_refund_updated(self, refund, live):
+        """A refund that FAILED / was CANCELED: the money stayed with us, but the licence was already revoked → the owner
+        decides (reinstate in the admin, or refund again). Nothing is changed automatically."""
+        status = str(refund.get("status", ""))
+        if status not in ("failed", "canceled"):
+            return {"ok": True, "ignored": "refund " + status}
+        sid, pi = self._session_of_pi(refund.get("payment_intent"))
+        cur = str(refund.get("currency", "") or "").upper()
+        tag = "" if live else "[TESZT] "
+        self._owner_mail(f"owner-refund-{status}:{refund.get('id', '')}", f"{tag}SIKERTELEN visszatérítés ({status}) – {self._amount(_cents(refund.get('amount')), cur)}",
+                         [f"{tag}A Stripe-visszatérítés állapota: {status} (ok: {refund.get('failure_reason') or '-'}).",
+                          f"Összeg: {self._amount(_cents(refund.get('amount')), cur)} · munkamenet: {sid or '-'} · fizetés: {pi or '-'}", "",
+                          "A licencet a visszatérítéskor visszavontuk. Teendő: a Stripe-ban ismételd meg a visszatérítést, vagy állítsd vissza a licencet az adminban."])
+        return {"ok": True, "refund_failed": True}
+
+    def _stripe_dispute(self, dispute, live, etype):
+        """Chargeback: opened → owner notice (the licence stays until the outcome); closed as LOST → like a full refund."""
+        sid, pi = self._session_of_pi(dispute.get("payment_intent"))
+        cur, amount = str(dispute.get("currency", "") or "").upper(), _cents(dispute.get("amount"))
+        status, tag = str(dispute.get("status", "")), ("" if live else "[TESZT] ")
+        result = {"ok": True, "dispute": status}
+        if etype == "charge.dispute.closed" and status == "lost" and sid:
+            result = self._order_refunded(sid, {"refunded_amount": amount, "status": "refunded", "total": amount, "currency": cur,
+                                                "user_email": ""}, not live)   # no buyer notice: the bank handled it
+        if etype == "charge.dispute.created" or status in ("lost", "won"):
+            self._owner_mail(f"owner-{etype}:{dispute.get('id', '')}", f"{tag}Chargeback ({status}) – {self._amount(amount, cur)}",
+                             [f"{tag}Vitatott terhelés (chargeback): {etype}, állapot: {status}, ok: {dispute.get('reason') or '-'}.",
+                              f"Összeg: {self._amount(amount, cur)} · munkamenet: {sid or '-'} · fizetés: {pi or '-'}",
+                              ("Licenc visszavonva: " + (", ".join(result.get("revoked") or []) or "-") + " · teendő: sztornó számla") if status == "lost"
+                              else "A vitát megnyerted, a licenc aktív marad." if status == "won"
+                              else "Teendő: a Stripe-ban válaszolj a vitára a határidőn belül (a licenc addig aktív)."])
+        return result
 
     # ------------------------------------------------------------------ e-mail: once per (kind, licence) + safe queue
     def _render_mail(self, kind, lid, prod, lang, order_id, test_mode, key=None, name=""):
