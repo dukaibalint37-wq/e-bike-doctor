@@ -563,10 +563,10 @@ class StripeCheckoutRequest(BaseModel):
 
 
 @app.post("/v1/shop/stripe/checkout")
-def stripe_checkout(req: StripeCheckoutRequest):
+def stripe_checkout(req: StripeCheckoutRequest, request: Request):
     """Website buy button → hosted Stripe Checkout (one-time payment). Returns {"url"} to redirect the browser to."""
     try:
-        return SHOP.stripe_checkout(req.product, req.lang, req.consent is True)
+        return SHOP.stripe_checkout(req.product, req.lang, req.consent is True, request.headers.get("origin", ""))
     except licensing_mod.LicenseError as exc:
         raise _lic_error(exc) from None
 

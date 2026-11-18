@@ -267,7 +267,19 @@ class Shop:
             logger.error("Stripe key mode %r does not match SHOP_MODE=%s - checkout refused", self.stripe.mode, self.mode)
             raise LicenseError("not_configured", 503, "Online payment is not available yet")
 
-    def stripe_checkout(self, product, lang, consent=False):
+    def _return_base(self, origin):
+        """Where Stripe sends the buyer back: the website the purchase started on, if it is an allowed CORS origin (e.g. the
+        local test site http://localhost:8099 on staging); otherwise SITE_URL. Live mode: https origins only."""
+        origin = (origin or "").strip().rstrip("/")
+        allowed = [o.strip().rstrip("/") for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+        if origin and origin in allowed and (origin.startswith("https://") or self.mode == "test"):
+            return origin
+        return ""
+
+    def _site_page(self, base, lang, page):
+        return (base + mail_templates.SITE_PAGES[page][lang]) if base else mail_templates.site_url(lang, page)
+
+    def stripe_checkout(self, product, lang, consent=False, origin=""):
         prod = PRODUCT_ALIASES.get(str(product or "").strip().lower())
         if prod not in PRICES:
             raise LicenseError("bad_product", 422, "Unknown product")
@@ -290,8 +302,8 @@ class Shop:
         # the tax ID; a Customer object keeps them in the Stripe dashboard as well
         params = {"mode": "payment", "line_items": [item], "locale": lang, "submit_type": "pay",
                   "billing_address_collection": "required", "tax_id_collection": {"enabled": True}, "customer_creation": "always",
-                  "success_url": mail_templates.site_url(lang, "thanks") + "?session_id={CHECKOUT_SESSION_ID}",
-                  "cancel_url": mail_templates.site_url(lang, "shop"),
+                  "success_url": self._site_page(self._return_base(origin), lang, "thanks") + "?session_id={CHECKOUT_SESSION_ID}",
+                  "cancel_url": self._site_page(self._return_base(origin), lang, "shop"),
                   "metadata": meta, "payment_intent_data": {"metadata": meta}}
         if os.getenv("STRIPE_AUTOMATIC_TAX", "0") == "1":       # only after Stripe Tax is set up in the dashboard
             params["automatic_tax"] = {"enabled": True}

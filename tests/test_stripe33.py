@@ -122,6 +122,23 @@ class CheckoutTest(StripeBase):
         self.assertEqual((q["line_items[0][price_data][unit_amount]"], q["metadata[product]"]), ("1499", "EBD-AND"))
         self.assertEqual(q["success_url"], "https://ebikedoctorpro.com/hu/koszonjuk/?session_id={CHECKOUT_SESSION_ID}")
 
+    def test_return_urls_follow_an_allowed_origin_only(self):
+        saved = os.environ.get("CORS_ORIGINS")
+        os.environ["CORS_ORIGINS"] = "https://ebikedoctorpro.com,http://localhost:8099"
+        try:
+            def urls(origin):
+                self.shop.stripe_checkout("windows", "hu", True, origin)
+                q = {k: v[0] for k, v in urllib.parse.parse_qs(self.stripe.calls[-1]["body"]).items()}
+                return q["success_url"], q["cancel_url"]
+            self.assertEqual(urls("http://localhost:8099"), ("http://localhost:8099/hu/koszonjuk/?session_id={CHECKOUT_SESSION_ID}",
+                                                             "http://localhost:8099/hu/webaruhaz/"))
+            self.assertTrue(urls("https://evil.example")[0].startswith("https://ebikedoctorpro.com/hu/koszonjuk/"))   # not allowed
+            self.assertTrue(urls("")[0].startswith("https://ebikedoctorpro.com/"))
+            os.environ["SHOP_MODE"] = "live"; self.shop.stripe = FakeStripe("sk_live_1"); self.stripe = self.shop.stripe
+            self.assertTrue(urls("http://localhost:8099")[0].startswith("https://ebikedoctorpro.com/"))         # live: https only
+        finally:
+            os.environ.pop("CORS_ORIGINS") if saved is None else os.environ.__setitem__("CORS_ORIGINS", saved)
+
     def test_dashboard_price_ids_are_used_when_configured(self):
         os.environ["STRIPE_PRICE_MAP"] = '{"EBD-AND":"price_and","EBD-WIN":"bogus"}'
         self.shop.stripe_checkout("android", "en", True)
