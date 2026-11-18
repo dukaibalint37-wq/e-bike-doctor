@@ -1,6 +1,17 @@
-"""Own-website shop integration (Lemon Squeezy as Merchant of Record) – SHOP_MODE=test by default.
+"""Own-website shop integration – SHOP_MODE=test by default.
 
-Webhook: POST /v1/shop/lemonsqueezy/webhook
+Stripe Checkout (3.3, primary): one-time payments (mode=payment, never a subscription).
+- POST /v1/shop/stripe/checkout {product, lang} → hosted Checkout Session URL. Prices: STRIPE_PRICE_MAP
+  '{"EBD-WIN":"price_...","EBD-AND":"price_..."}' (one-time Prices in the Stripe dashboard) or, without it, the shop
+  prices below as inline price_data. The key mode must match SHOP_MODE (sk_test_ ↔ test, sk_live_ ↔ live), else 503.
+- POST /v1/shop/stripe/webhook: Stripe-Signature verified with STRIPE_WEBHOOK_SECRET (timestamp tolerance, constant time).
+  checkout.session.completed / .async_payment_succeeded → the session is RE-READ from the Stripe API and a licence is
+  issued only when it is paid, a one-time payment, in the expected mode and for a known product (else nothing is issued);
+  charge.refunded (full) → licence revoked; partial refund → recorded only.
+- Duplicates: every event id is processed once, a per-session lock stops concurrent deliveries, and licensing.create is
+  idempotent per (session, product) → never two licences or two licence e-mails for one payment.
+
+Lemon Squeezy (legacy, store closing; kept until removed) – webhook: POST /v1/shop/lemonsqueezy/webhook
 - Signature: X-Signature = hex(HMAC-SHA256(raw body, LEMONSQUEEZY_WEBHOOK_SECRET)) – constant-time compare; unsigned/forged → 401.
 - Events: order_created (paid) → licence + download entitlement + e-mail; order_refunded → licence revoked.
 - Idempotent: each (event, order) is processed once (Lemon Squeezy retries webhooks).
@@ -20,6 +31,7 @@ import time
 
 import mail_templates
 import s3presign
+import stripe_pay
 from licensing import PRODUCTS, LicenseError, decrypt_key, email_hash, encrypt_key
 
 logger = logging.getLogger("ebike-doctor.shop")
@@ -70,9 +82,29 @@ def product_map():
         return {}
 
 
+PRODUCT_ALIASES = {"windows": "EBD-WIN", "win": "EBD-WIN", "ebd-win": "EBD-WIN", "android": "EBD-AND", "and": "EBD-AND", "ebd-and": "EBD-AND"}
+STRIPE_PAID_EVENTS = ("checkout.session.completed", "checkout.session.async_payment_succeeded")
+
+
+def price_cents(product):
+    from decimal import Decimal
+    return int(Decimal(PRICES[product][0]) * 100)
+
+
+def stripe_price_map():
+    """Optional one-time Prices created in the Stripe dashboard: STRIPE_PRICE_MAP='{"EBD-WIN":"price_...","EBD-AND":"price_..."}'.
+    Without it the shop prices (PRICES) are sent as inline price_data - the same amounts as on the website."""
+    try:
+        m = json.loads(os.getenv("STRIPE_PRICE_MAP", "{}") or "{}")
+        return {k: str(v) for k, v in m.items() if k in PRICES and str(v).startswith("price_")}
+    except (ValueError, AttributeError):
+        return {}
+
+
 class Shop:
-    def __init__(self, store, licenses, mailer, clock=time.time):
+    def __init__(self, store, licenses, mailer, clock=time.time, stripe=None):
         self.store, self.licenses, self.mailer, self.clock = store, licenses, mailer, clock
+        self.stripe = stripe or stripe_pay.StripeClient()
 
     @property
     def mode(self):
@@ -132,11 +164,15 @@ class Shop:
         if not products:
             logger.error("order %s: unknown product/variant – check LS_PRODUCT_MAP", order_id)
             return {"ok": True, "ignored": "unknown product"}
-        email, name = attrs.get("user_email", ""), attrs.get("user_name", "")
-        money = order_money(attrs)
+        return self._fulfil(order_id, products, attrs.get("user_email", ""), attrs.get("user_name", ""), order_money(attrs),
+                            test_mode, lang, "lemonsqueezy")
+
+    def _fulfil(self, order_id, products, email, name, money, test_mode, lang, source):
+        """Licence + download entitlement + ONE purchase e-mail per product of a VERIFIED paid order. Idempotent per
+        (order, product): licensing.create returns key=None for an order that already has its licence."""
         issued = []
         for prod in products:
-            key, rec = self.licenses.create(prod, email=email, name=name, test=test_mode, source="lemonsqueezy", order_id=order_id)
+            key, rec = self.licenses.create(prod, email=email, name=name, test=test_mode, source=source, order_id=order_id)
             if key is None:          # already issued for this order (retry)
                 continue
             month = time.strftime("%Y%m", time.gmtime(self.clock()))
@@ -149,11 +185,166 @@ class Shop:
             state = self._send_once("purchase", rec["lid"], prod, lang, email, order_id, test_mode, key=key, name=name)
             self._log_order({"t": int(self.clock()), "order": order_id, "product": prod, "mode": md, **money, "lid": rec["lid"],
                              "email": rec.get("email_masked", ""), "lang": lang, "mail_sent": state == "sent", "mail_state": state,
-                             "refunded": False})
+                             "refunded": False, "provider": source})
             if state != "sent":
                 logger.error("order %s: licence %s created, purchase e-mail state=%s", order_id, rec["lid"], state)
         self.process_mail_queue(limit=5)          # opportunistic: queued mails go out as soon as a provider works again
         return {"ok": True, "licences": issued}
+
+    # ------------------------------------------------------------------ Stripe Checkout (3.3)
+    def stripe_status(self):
+        """Admin view - booleans and modes only, never a key."""
+        pk = os.getenv("STRIPE_PUBLISHABLE_KEY", "").strip()
+        return {"secret_key": self.stripe.configured, "key_mode": self.stripe.mode, "publishable_key": bool(pk),
+                "publishable_mode": stripe_pay.key_mode(pk), "webhook_secret": bool(os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()),
+                "price_map": sorted(stripe_price_map()), "mode_matches_shop": bool(self.stripe.mode) and self.stripe.mode == self.mode,
+                "checkout_ready": self.stripe.configured and self.stripe.mode == self.mode}
+
+    def _stripe_ready(self):
+        """A key whose mode differs from SHOP_MODE never takes a payment (no live charge from the test shop and vice versa)."""
+        if not self.stripe.configured:
+            raise LicenseError("not_configured", 503, "Online payment is not available yet")
+        if self.stripe.mode != self.mode:
+            logger.error("Stripe key mode %r does not match SHOP_MODE=%s - checkout refused", self.stripe.mode, self.mode)
+            raise LicenseError("not_configured", 503, "Online payment is not available yet")
+
+    def stripe_checkout(self, product, lang):
+        prod = PRODUCT_ALIASES.get(str(product or "").strip().lower())
+        if prod not in PRICES:
+            raise LicenseError("bad_product", 422, "Unknown product")
+        lang = mail_templates.lang_of(lang)
+        self._stripe_ready()
+        meta = {"product": prod, "lang": lang, "shop": "ebd-website"}
+        price_id = stripe_price_map().get(prod)
+        if price_id:
+            item = {"price": price_id, "quantity": 1}
+        else:
+            item = {"price_data": {"currency": PRICES[prod][1].lower(), "unit_amount": price_cents(prod), "tax_behavior": "inclusive",
+                                   "product_data": {"name": mail_templates.NAMES[prod]["en"], "metadata": {"product": prod}}},
+                    "quantity": 1}
+        params = {"mode": "payment", "line_items": [item], "locale": lang, "submit_type": "pay",
+                  "success_url": mail_templates.site_url(lang, "thanks") + "?session_id={CHECKOUT_SESSION_ID}",
+                  "cancel_url": mail_templates.site_url(lang, "shop"),
+                  "metadata": meta, "payment_intent_data": {"metadata": meta}}
+        if os.getenv("STRIPE_AUTOMATIC_TAX", "0") == "1":       # only after Stripe Tax is set up in the dashboard
+            params["automatic_tax"] = {"enabled": True}
+        if os.getenv("STRIPE_INVOICE", "0") == "1":             # Stripe-hosted invoice PDF (extra Stripe fee)
+            params["invoice_creation"] = {"enabled": True}
+        if os.getenv("STRIPE_REQUIRE_TERMS", "0") == "1":       # needs the terms URL set in Stripe → Settings → Public details
+            params["consent_collection"] = {"terms_of_service": "required"}
+        try:
+            s = self.stripe.create_checkout_session(params)
+        except stripe_pay.StripeError as exc:
+            logger.error("Stripe checkout session failed: status=%s code=%s", exc.status, exc.code)
+            raise LicenseError("payment_unavailable", 503, "The payment page could not be opened - please try again later") from None
+        if not s.get("url"):
+            raise LicenseError("payment_unavailable", 503, "The payment page could not be opened - please try again later")
+        day = time.strftime("%Y%m%d", time.gmtime(self.clock()))
+        self.store.incr(f"shop:checkouts:{day}:{prod}:{self.mode}", 400 * 86_400)
+        return {"url": s["url"], "id": s.get("id", "")}
+
+    def handle_stripe_webhook(self, raw: bytes, sig_header: str):
+        if not stripe_pay.verify_signature(raw, sig_header, os.getenv("STRIPE_WEBHOOK_SECRET", "").strip(), now=self.clock()):
+            self.store.incr("shop:rejected_sig", 400 * 86_400)
+            raise LicenseError("bad_signature", 401, "Invalid webhook signature")
+        try:
+            ev = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            raise LicenseError("bad_payload", 400, "Invalid JSON") from None
+        ev_id, etype, live = str(ev.get("id", "")), str(ev.get("type", "")), bool(ev.get("livemode"))
+        obj = (ev.get("data") or {}).get("object") or {}
+        if not ev_id or not isinstance(obj, dict):
+            return {"ok": True, "ignored": "malformed event"}
+        if self.mode == "test" and live:
+            logger.warning("LIVE Stripe event ignored because SHOP_MODE=test event=%s", ev_id)
+            return {"ok": True, "ignored": "live event while SHOP_MODE=test"}
+        if self.mode == "live" and not live and os.getenv("SHOP_ACCEPT_TEST_ORDERS", "0") != "1":
+            logger.warning("TEST Stripe event ignored because SHOP_MODE=live event=%s", ev_id)
+            return {"ok": True, "ignored": "test event while SHOP_MODE=live"}
+        done_key = "shop:stripe_evt:" + ev_id
+        if self.store.get(done_key):
+            return {"ok": True, "duplicate": True}
+        if etype in STRIPE_PAID_EVENTS:
+            result = self._stripe_session_paid(str(obj.get("id", "")), live)      # raises 503/409 → not marked done, Stripe retries
+        elif etype == "charge.refunded":
+            result = self._stripe_refunded(obj, live)
+        elif etype == "checkout.session.async_payment_failed":
+            logger.warning("Stripe delayed payment failed for session %s - no licence", obj.get("id", ""))
+            result = {"ok": True, "ignored": "payment failed"}
+        else:
+            result = {"ok": True, "ignored": etype}
+        self.store.set(done_key, int(self.clock()), 400 * 86_400)
+        return result
+
+    def _stripe_reject(self, sid, why):
+        logger.error("Stripe session %s NOT fulfilled: %s", sid, why)
+        self.store.incr("shop:stripe_rejected", 800 * 86_400)
+        return {"ok": True, "ignored": why}
+
+    def _stripe_session_paid(self, sid, live):
+        if not sid.startswith("cs_"):
+            return {"ok": True, "ignored": "not a checkout session"}
+        lock = "shop:stripe_lock:" + sid
+        if self.store.incr(lock, 120) != 1:            # the same session is being processed right now (parallel delivery)
+            raise LicenseError("busy", 409, "Session is being processed")
+        try:
+            # never trust the event body alone: re-read the session with the secret key
+            try:
+                s = self.stripe.get_checkout_session(sid)
+            except stripe_pay.StripeError as exc:
+                logger.error("Stripe session %s could not be verified (status=%s code=%s) - Stripe will retry", sid, exc.status, exc.code)
+                raise LicenseError("verification_unavailable", 503, "Payment could not be verified yet") from None
+            if s.get("id") != sid:
+                return self._stripe_reject(sid, "session id mismatch")
+            if s.get("payment_status") != "paid":
+                return {"ok": True, "ignored": "not paid (" + str(s.get("payment_status")) + ")"}   # async methods: a later event
+            if s.get("mode") != "payment":
+                return self._stripe_reject(sid, "not a one-time payment")
+            if bool(s.get("livemode")) != live:
+                return self._stripe_reject(sid, "livemode mismatch")
+            meta = s.get("metadata") or {}
+            prod = meta.get("product")
+            if prod not in PRICES or meta.get("shop") != "ebd-website":
+                return self._stripe_reject(sid, "unknown product")
+            currency = str(s.get("currency", "") or "").upper()
+            if prod not in stripe_price_map():          # inline price: the amount must be exactly the shop price
+                if currency != PRICES[prod][1] or int(s.get("amount_subtotal") or 0) != price_cents(prod):
+                    return self._stripe_reject(sid, f"amount mismatch {s.get('amount_subtotal')} {currency}")
+            cd = s.get("customer_details") or {}
+            email = (cd.get("email") or s.get("customer_email") or "").strip()
+            if not EMAIL_RE.fullmatch(email):
+                return self._stripe_reject(sid, "no valid buyer e-mail")
+            td = s.get("total_details") or {}
+            money = {"total": _cents(s.get("amount_total")), "subtotal": _cents(s.get("amount_subtotal")), "tax": _cents(td.get("amount_tax")),
+                     "discount": _cents(td.get("amount_discount")), "currency": currency[:3], "tax_name": "", "tax_rate": 0.0,
+                     "tax_inclusive": True, "total_usd": 0, "tax_usd": 0}
+            pi = s.get("payment_intent")
+            pi = pi.get("id") if isinstance(pi, dict) else pi
+            if pi:
+                self.store.set("shop:stripe_pi:" + str(pi), sid, 800 * 86_400)
+            return self._fulfil(sid, [prod], email, (cd.get("name") or "")[:120], money, not live,
+                                mail_templates.lang_of(meta.get("lang")), "stripe")
+        finally:
+            self.store.set(lock, 0, 5)
+
+    def _stripe_refunded(self, charge, live):
+        pi = charge.get("payment_intent")
+        pi = pi.get("id") if isinstance(pi, dict) else pi
+        sid = self.store.get("shop:stripe_pi:" + str(pi)) if pi else None
+        if not sid:
+            logger.warning("Stripe refund for unknown payment %s - nothing to revoke", pi)
+            return {"ok": True, "ignored": "unknown payment"}
+        amount, refunded = _cents(charge.get("amount")), _cents(charge.get("amount_refunded"))
+        full = bool(charge.get("refunded")) or (amount and refunded >= amount)
+        email = ((charge.get("billing_details") or {}).get("email") or charge.get("receipt_email") or "").strip()
+        if not email:
+            try:
+                email = ((self.stripe.get_checkout_session(sid).get("customer_details") or {}).get("email") or "").strip()
+            except stripe_pay.StripeError:
+                email = ""                 # the licence is still revoked; the notice is then not sent (logged)
+        attrs = {"refunded_amount": refunded, "status": "refunded" if full else "partial_refund", "total": amount,
+                 "currency": str(charge.get("currency", "") or "").upper(), "user_email": email}
+        return self._order_refunded(sid, attrs, not live)
 
     # ------------------------------------------------------------------ e-mail: once per (kind, licence) + safe queue
     def _render_mail(self, kind, lid, prod, lang, order_id, test_mode, key=None, name=""):

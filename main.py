@@ -51,7 +51,7 @@ LIMITED_PREFIXES = ("/v1/diagnose", "/v1/vision-diagnose", "/v1/chat", "/v1/smar
                     "/v1/interest", "/v1/admin/login")
 ENDPOINTS = ["/health", "/v1/register", "/v1/quota", "/v1/diagnose", "/v1/diagnose/stream", "/v1/smart-diagnose",
              "/v1/smart-diagnose/stream", "/v1/vision-diagnose", "/v1/chat", "/v1/chat/stream", "/v1/metrics", "/v1/report",
-             "/v1/license/activate", "/v1/license/refresh", "/v1/license/deactivate", "/v1/shop/lemonsqueezy/webhook", "/v1/shop/download",
+             "/v1/license/activate", "/v1/license/refresh", "/v1/license/deactivate", "/v1/shop/stripe/checkout", "/v1/shop/stripe/webhook", "/v1/shop/lemonsqueezy/webhook", "/v1/shop/download",
              "/v1/shop/download-link", "/v1/shop/resend", "/v1/interest", "/v1/app/update"]
 # Browser access for the website forms only (the apps are not browsers and are unaffected). Empty = no CORS at all.
 CORS_ORIGINS = [o.strip().rstrip("/") for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
@@ -102,7 +102,8 @@ def client_ip(request: Request) -> str:
 @app.middleware("http")
 async def security_headers_and_burst_limit(request: Request, call_next):
     t0 = time.monotonic()
-    if request.method == "POST" and request.url.path.startswith(LIMITED_PREFIXES):
+    # payment webhooks are signature-verified and come from a few provider IPs: never burst-limit them (a sales peak would 429)
+    if request.method == "POST" and request.url.path.startswith(LIMITED_PREFIXES) and not request.url.path.endswith("/webhook"):
         ip = client_ip(request)
         now = time.monotonic()
         with _rate_lock:
@@ -555,6 +556,29 @@ def license_deactivate(req: LicenseKeyRequest):
         raise _lic_error(exc) from None
 
 
+class StripeCheckoutRequest(BaseModel):
+    product: Literal["windows", "android", "EBD-WIN", "EBD-AND"]
+    lang: Literal["hu", "de", "en"] = "en"
+
+
+@app.post("/v1/shop/stripe/checkout")
+def stripe_checkout(req: StripeCheckoutRequest):
+    """Website buy button → hosted Stripe Checkout (one-time payment). Returns {"url"} to redirect the browser to."""
+    try:
+        return SHOP.stripe_checkout(req.product, req.lang)
+    except licensing_mod.LicenseError as exc:
+        raise _lic_error(exc) from None
+
+
+@app.post("/v1/shop/stripe/webhook")
+async def stripe_webhook(request: Request):
+    raw = await request.body()
+    try:
+        return SHOP.handle_stripe_webhook(raw, request.headers.get("stripe-signature", ""))
+    except licensing_mod.LicenseError as exc:
+        raise _lic_error(exc) from None
+
+
 @app.post("/v1/shop/lemonsqueezy/webhook")
 async def lemonsqueezy_webhook(request: Request):
     raw = await request.body()
@@ -823,6 +847,7 @@ def admin_dashboard(mode: str = "live", x_admin_token: Optional[str] = Header(de
                        "download_bucket": s3presign.configured(), "lease_signing": LICENSES.lease.available,
                        "mail_health": mailer_mod.health(STORE),
                        "lemonsqueezy_map": bool(shop_mod.product_map()), "webhook_secret": bool(os.getenv("LEMONSQUEEZY_WEBHOOK_SECRET", "").strip()),
+                       "stripe": SHOP.stripe_status(),
                        "cors_origins": CORS_ORIGINS, "admin_2fa": ADMIN_AUTH.configured,
                        "header_token_enabled": os.getenv("ADMIN_HEADER_TOKEN", "1").strip() != "0", "store": STORE.kind},
             "outbox": list(reversed(outbox if isinstance(outbox, list) else []))[:30], "audit": ADMIN_AUTH.audit_log()[:40],

@@ -20,7 +20,9 @@ def support():
 
 OFFICIAL_SITE = "https://ebikedoctorpro.com"          # official domain since 2026-11-14 (SITE_URL overrides, e.g. for tests)
 SITE_PAGES = {"home": {"hu": "/hu/", "de": "/de/", "en": "/en/"},
-              "downloads": {"hu": "/hu/letoltesek/", "de": "/de/downloads/", "en": "/en/downloads/"}}
+              "downloads": {"hu": "/hu/letoltesek/", "de": "/de/downloads/", "en": "/en/downloads/"},
+              "shop": {"hu": "/hu/webaruhaz/", "de": "/de/shop/", "en": "/en/shop/"},
+              "thanks": {"hu": "/hu/koszonjuk/", "de": "/de/danke/", "en": "/en/thank-you/"}}
 
 
 def site_url(lang, page="home"):
@@ -50,7 +52,7 @@ T = {
         "device": "Egy licenc egyszerre egy eszközön aktív. Eszközcsere az alkalmazásból indítható (30 napon belül legfeljebb 2 alkalommal).",
         "ai": "A PRO tartalmaz AI-hibaelemzést: licencenként napi 50 kérdés, a szolgáltatás teljes napi/havi költségkeretén belül.",
         "keep": "Őrizd meg ezt a levelet – a licenckulcsra újratelepítéskor is szükséged lesz.",
-        "price": "Ár: {price}, egyszeri vásárlás. A számlát és a visszatérítést a Lemon Squeezy (viszonteladó) kezeli.",
+        "price": "Ár: {price}, egyszeri vásárlás (nem előfizetés). A fizetést a Stripe dolgozza fel; a kártyaadatokat mi nem látjuk.",
         "support": "Segítség: {s}",
         "resend_intro": "Kérésedre elküldjük az ehhez az e-mail-címhez tartozó aktív licenceket.",
         "resend_nokey": "Ehhez a licenchez a kulcs nem küldhető újra automatikusan – írj az ügyfélszolgálatnak, és új kulcsot állítunk ki.",
@@ -63,7 +65,7 @@ T = {
         "subj_refund": "{name} – visszatérítés és licencvisszavonás",
         "refund_intro": "A rendelésed ({order}) visszatérítése megtörtént.",
         "refund_licence": "A rendeléshez tartozó licenc (…{hint}) ezzel érvényét vesztette: az alkalmazás a következő online ellenőrzéskor visszavált ingyenes módra, a letöltési linkek pedig nem működnek tovább.",
-        "refund_money": "A visszatérítés összegét a Lemon Squeezy (viszonteladó) utalja vissza az eredeti fizetési módra; a jóváírás a banktól függően néhány napig tarthat.",
+        "refund_money": "A visszatérített összeg a Stripe-on keresztül az eredeti fizetési módra érkezik vissza; a jóváírás a banktól függően néhány napig tarthat.",
         "refund_mistake": "Ha nem kérted a visszatérítést, válaszolj erre a levélre vagy írj az ügyfélszolgálatnak.",
     },
     "de": {
@@ -87,7 +89,7 @@ T = {
         "device": "Eine Lizenz ist gleichzeitig auf einem Gerät aktiv. Gerätewechsel in der App (höchstens 2-mal in 30 Tagen).",
         "ai": "PRO enthält KI-Fehleranalyse: 50 Fragen pro Tag und Lizenz, im Rahmen des täglichen/monatlichen Gesamtbudgets des Dienstes.",
         "keep": "Bitte bewahren Sie diese E-Mail auf – den Schlüssel brauchen Sie auch bei einer Neuinstallation.",
-        "price": "Preis: {price}, Einmalkauf. Rechnung und Erstattung über Lemon Squeezy (Wiederverkäufer).",
+        "price": "Preis: {price}, Einmalkauf (kein Abo). Die Zahlung wird von Stripe abgewickelt; Ihre Kartendaten sehen wir nicht.",
         "support": "Hilfe: {s}",
         "resend_intro": "Wie angefordert senden wir Ihnen die aktiven Lizenzen zu dieser E-Mail-Adresse.",
         "resend_nokey": "Für diese Lizenz kann der Schlüssel nicht automatisch erneut gesendet werden – bitte kontaktieren Sie den Support, wir stellen einen neuen Schlüssel aus.",
@@ -100,7 +102,7 @@ T = {
         "subj_refund": "{name} – Erstattung und Lizenzwiderruf",
         "refund_intro": "Ihre Bestellung ({order}) wurde erstattet.",
         "refund_licence": "Die zugehörige Lizenz (…{hint}) ist damit ungültig: Die App wechselt bei der nächsten Online-Prüfung in den kostenlosen Modus, und die Download-Links funktionieren nicht mehr.",
-        "refund_money": "Den Betrag erstattet Lemon Squeezy (Wiederverkäufer) auf die ursprüngliche Zahlungsart; die Gutschrift kann je nach Bank einige Tage dauern.",
+        "refund_money": "Der Betrag wird über Stripe auf die ursprüngliche Zahlungsart zurückerstattet; die Gutschrift kann je nach Bank einige Tage dauern.",
         "refund_mistake": "Falls Sie keine Erstattung angefordert haben, antworten Sie bitte auf diese E-Mail oder kontaktieren Sie den Support.",
     },
     "en": {
@@ -124,7 +126,7 @@ T = {
         "device": "One licence is active on one device at a time. Device change from the app (at most 2 times in 30 days).",
         "ai": "PRO includes AI fault analysis: 50 questions per day per licence, within the service's overall daily/monthly budget.",
         "keep": "Please keep this e-mail – you will need the key again if you reinstall.",
-        "price": "Price: {price}, one-time purchase. Invoice and refunds are handled by Lemon Squeezy (reseller).",
+        "price": "Price: {price}, one-time purchase (no subscription). Payment is processed by Stripe; we never see your card details.",
         "support": "Help: {s}",
         "resend_intro": "As requested, here are the active licences for this e-mail address.",
         "resend_nokey": "The key of this licence cannot be re-sent automatically – please contact support and we will issue a new key.",
@@ -137,7 +139,7 @@ T = {
         "subj_refund": "{name} – refund and licence revocation",
         "refund_intro": "Your order ({order}) has been refunded.",
         "refund_licence": "The licence of this order (…{hint}) is therefore no longer valid: the app switches back to the free mode at its next online check, and the download links stop working.",
-        "refund_money": "Lemon Squeezy (the reseller) returns the amount to the original payment method; depending on the bank this can take a few days.",
+        "refund_money": "The amount is returned to the original payment method via Stripe; depending on the bank this can take a few days.",
         "refund_mistake": "If you did not request a refund, please reply to this e-mail or contact support.",
     },
 }
@@ -209,7 +211,7 @@ def resend(lang, items):
 
 
 def refund(product, lang, order_id, key_hint, test):
-    """Buyer notice after a refund: the licence is revoked (the money itself is returned by Lemon Squeezy)."""
+    """Buyer notice after a refund: the licence is revoked (the money itself is returned by the payment provider)."""
     lang = lang_of(lang)
     t, e, pname = T[lang], _h.escape, NAMES[product][lang]
     paras = [t["refund_intro"].format(order=order_id), t["refund_licence"].format(hint=key_hint or "????"), t["refund_money"], t["refund_mistake"]]
