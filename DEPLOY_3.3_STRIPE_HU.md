@@ -49,3 +49,16 @@ Vészleállítás: `deactivate --confirm` (SHOP_MODE=test → a pénztár azonna
   visszatérítés EUR-ban számol (3.3: `currency_conversion`). A számla pénznemét a könyvelővel egyeztesd.
 - Tesztlicencek az élesen: 7 db, mind visszavonva és `test` jelölésű (élő statisztikában nem szerepelnek); 2 aktív tulajdonosi licenc.
   Opcionális: admin → „Tesztadatok leválasztása” (purge) az élesítés előtt.
+
+## Ingyenes Render (alvó szerver) – miért nem veszhet el fizetés vagy licenc
+| Helyzet | Mi történik |
+|---|---|
+| A webhook alvó szervert ér, időtúllépés | A Stripe újrapróbálja (élesben ~3 napig); a feldolgozás idempotens, nincs dupla licenc/levél |
+| A szerver a licenc után, a levél előtt áll le | Az újrapróbálás felismeri, és a levelet MOST küldi ki (egyszer) |
+| A szerver a levélküldés KÖZBEN áll le | Nem küldi újra vakon (dupla levél ellen) → „bizonytalan” lista + riasztás neked; adminban 1 kattintás |
+| A webhook egyáltalán nem érkezik meg (rossz titok, a Stripe feladta) | 1) a köszönőoldal visszaigazolja a munkamenetet; 2) minden ébredéskor/fizetéskor/webhooknál (max. 15 percenként) a szerver lekéri a Stripe-ból az elmúlt 7 nap kifizetett vásárlásait, és pótolja a hiányzót → „Pótolt licenc” értesítő |
+| A levélküldő (Resend) nem fogadja a levelet | Sorba kerül, automatikusan újrapróbálja; riasztás neked; siker esetén „utólag kézbesítve” értesítő; 14 nap után „gave_up” riasztás |
+| A tulajdonosi értesítő sem megy ki (szolgáltató leállt) | Megőrizzük és a sorral együtt újraküldjük |
+| Kifizetett munkamenet, de az ellenőrzés elutasítja (pl. összeg) | „Fizetés LICENC NÉLKÜL” riasztás – kézi döntés |
+
+Kézi egyeztetés: admin `POST /v1/admin/shop/reconcile` (az állapot az admin Rendszer fülén: `reconcile_last`).
