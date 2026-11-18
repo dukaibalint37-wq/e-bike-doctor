@@ -62,3 +62,19 @@ Vészleállítás: `deactivate --confirm` (SHOP_MODE=test → a pénztár azonna
 | Kifizetett munkamenet, de az ellenőrzés elutasítja (pl. összeg) | „Fizetés LICENC NÉLKÜL” riasztás – kézi döntés |
 
 Kézi egyeztetés: admin `POST /v1/admin/shop/reconcile` (az állapot az admin Rendszer fülén: `reconcile_last`).
+
+## Éles kulcs, jogosultságok, webhook (2026-11-18 kiegészítés)
+**Korlátozott kulcs (javasolt, `rk_live_…`) jogosultságai** – a backend kódjából:
+| Erőforrás | Jog | Mire kell |
+|---|---|---|
+| Checkout Sessions | **Write** | pénztár-munkamenet létrehozása, visszaolvasás, egyeztetés (lista) |
+| PaymentIntents | **Read** | a vevő tényleges (pl. HUF) fizetett összege |
+| Charges | **Read** | ugyanaz (`expand: latest_charge`) |
+| Webhook Endpoints | **Read** | csak az élesítő eszköz ellenőrzése |
+| minden más | None | – |
+
+Kulcsfájl rejtett beírással (érték nem jelenik meg):
+`powershell -ExecutionPolicy Bypass -File tools\stripe_live_keyfile.ps1` → `C:\EBD_SIGNING\stripe-live\stripe-live.env` (csak a saját Windows-felhasználó olvashatja).
+
+Lépések: `plan` (jogosultsági próba: éles munkamenet létrehozva és azonnal lejáratva, terhelés nincs) → `stage-keys --confirm`
+(kulcsok a szerverre, SHOP_MODE=test marad → értékesítés KI) → külön jóváhagyással `activate --confirm` (csak SHOP_MODE=live).

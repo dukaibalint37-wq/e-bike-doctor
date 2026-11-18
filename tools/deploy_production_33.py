@@ -8,6 +8,8 @@ C:\\EBD_SIGNING and the Render API, compared by equality and NEVER printed.
   python tools/deploy_production_33.py deploy --confirm         STEP 1 - code only, NO sales: backup, rollback tag, fast-forward main
                                                                 to feature/stripe-checkout, regression. SHOP_MODE stays "test", no
                                                                 Stripe key -> /v1/shop/stripe/checkout answers 503 (sales off).
+  python tools/deploy_production_33.py stage-keys --confirm     STEP 1b - live keys + webhook secret onto the server, sales stay OFF
+                                                                (SHOP_MODE=test: a live key never matches -> checkout 503)
   python tools/deploy_production_33.py activate --confirm       STEP 2 - LIVE SALES, ONLY with the owner's separate approval:
                                                                 live keys from the key file, SHOP_MODE=live, redeploy, checks
   python tools/deploy_production_33.py deactivate --confirm     emergency stop: SHOP_MODE=test (live key no longer matches -> 503)
@@ -15,7 +17,8 @@ C:\\EBD_SIGNING and the Render API, compared by equality and NEVER printed.
                                                                 main back to the tag eles-3.2.0-3.3-elott + Render env from the backup
 
 Live key file (created by the owner, KEY=VALUE lines):  C:\\EBD_SIGNING\\stripe-live\\stripe-live.env
-  STRIPE_SECRET_KEY=sk_live_...   (or a restricted rk_live_ key: Checkout Sessions write, Customers write, Charges/Refunds/Disputes read)
+  STRIPE_SECRET_KEY=rk_live_...   restricted key (recommended), permissions: Checkout Sessions: Write · PaymentIntents: Read ·
+                                  Charges: Read · Webhook Endpoints: Read · everything else: None   (a full sk_live_ also works)
   STRIPE_PUBLISHABLE_KEY=pk_live_...
   STRIPE_WEBHOOK_SECRET=whsec_... (signing secret of the LIVE endpoint https://e-bike-doctor.onrender.com/v1/shop/stripe/webhook)
 """
@@ -99,8 +102,44 @@ def check_keys(kv):
             ok = any(w.get("status") == "enabled" and (EVENTS <= set(w.get("enabled_events", [])) or "*" in w.get("enabled_events", [])) for w in eps)
             out.append((ok, f"live webhook {WEBHOOK_URL}: {'enabled with all 7 events' if ok else 'MISSING / disabled / events missing'}"))
         except stripe_pay.StripeError as e:
-            out.append((False, f"webhook endpoint list: {e.status} {e.code} (create it in the Dashboard, live mode)"))
+            out.append((False, f"webhook endpoint list: {e.status} {e.code} (needs 'Webhook Endpoints: Read'; create the endpoint in the Dashboard, live mode)"))
+        out += permission_probe(c)
     return all(o for o, _ in out), out
+
+
+def permission_probe(c):
+    """Proves the key can do EXACTLY what the server does: a live Checkout Session built by the server code itself (shop.py,
+    SHOP_MODE=live in this process only) is created and IMMEDIATELY expired - nobody can pay it, nothing is charged.
+    Then the read calls of the HUF lookup and of the reconcile. Required restricted-key permissions:
+    Checkout Sessions: Write · PaymentIntents: Read · Charges: Read · Webhook Endpoints: Read (this tool only)."""
+    import shop as shop_mod, stripe_pay
+    from store import MemoryStore
+    out, saved = [], os.environ.get("SHOP_MODE")
+    os.environ["SHOP_MODE"] = "live"
+    try:
+        sh = shop_mod.Shop(MemoryStore(), None, None, stripe=c)
+        try:
+            r = sh.stripe_checkout("android", "hu", True, "https://ebikedoctorpro.com")
+            sid = r["id"]
+            ok = sid.startswith("cs_live_")
+            try:
+                c.request("POST", f"/checkout/sessions/{sid}/expire")
+                exp = "created and expired at once (never payable)"
+            except stripe_pay.StripeError as e:
+                exp = f"created; expire failed {e.status} {e.code} - it expires by itself within 24 h"
+            out.append((ok, f"permission Checkout Sessions: Write -> live session {exp}"))
+        except Exception as e:  # noqa: BLE001 - shop wraps Stripe errors
+            out.append((False, f"permission Checkout Sessions: Write -> FAILED ({type(e).__name__}: {getattr(e, 'message', '')[:80]})"))
+        for path, label in (("/checkout/sessions", "Checkout Sessions: Read (reconcile)"), ("/payment_intents", "PaymentIntents: Read"),
+                            ("/charges", "Charges: Read")):
+            try:
+                c.request("GET", path, {"limit": 1})
+                out.append((True, f"permission {label}"))
+            except stripe_pay.StripeError as e:
+                out.append((False, f"permission {label} -> {e.status} {e.code}"))
+    finally:
+        os.environ.pop("SHOP_MODE") if saved is None else os.environ.__setitem__("SHOP_MODE", saved)
+    return out
 
 
 def upstash_export(e, count_only=False):
@@ -241,7 +280,10 @@ def main():
         git("push", "-q", "origin", f"{target}:refs/heads/main")                  # fast-forward only (no --force)
         print("deploy:", wait_deploy(commit=target))
         print("REGRESSION:", "OK" if regression(folder, "off") else f"FAILED -> rollback {folder} --confirm")
-    elif cmd == "activate":
+    elif cmd in ("stage-keys", "activate"):
+        # stage-keys: live keys + webhook secret + owner address onto the server, SHOP_MODE stays "test" -> a live key never
+        #   matches the test shop: checkout 503, live events ignored, reconcile skipped = sales still OFF.
+        # activate: (keys as above if not staged yet) + SHOP_MODE=live -> LIVE SALES. Only with the owner's separate approval.
         kv = live_keys()
         if kv is None:
             sys.exit(f"refused: live key file missing ({KEYFILE})")
@@ -249,19 +291,28 @@ def main():
         for o, m in msgs:
             print(("OK   " if o else "MISS ") + m)
         if not ok:
-            sys.exit("refused: live keys / webhook not ready")
+            sys.exit("refused: live keys / permissions / webhook not ready")
         if health().get("version") != VERSION:
             sys.exit("refused: run STEP 1 (deploy) first")
         e = env()
-        folder = backup("pre-activate")
-        new = {"STRIPE_SECRET_KEY": kv["STRIPE_SECRET_KEY"], "STRIPE_PUBLISHABLE_KEY": kv["STRIPE_PUBLISHABLE_KEY"],
-               "STRIPE_WEBHOOK_SECRET": kv["STRIPE_WEBHOOK_SECRET"], "OWNER_NOTIFY_EMAIL": e.get("MAIL_REPLY_TO", ""), "SHOP_MODE": "live"}
+        folder = backup("pre-" + cmd)
+        new = {k: v for k, v in {"STRIPE_SECRET_KEY": kv["STRIPE_SECRET_KEY"], "STRIPE_PUBLISHABLE_KEY": kv["STRIPE_PUBLISHABLE_KEY"],
+                                 "STRIPE_WEBHOOK_SECRET": kv["STRIPE_WEBHOOK_SECRET"], "OWNER_NOTIFY_EMAIL": e.get("MAIL_REPLY_TO", "")}.items()
+               if e.get(k) != v}                                               # only what differs (names printed, never values)
+        if cmd == "activate":
+            new["SHOP_MODE"] = "live"
+        print("variables to set:", sorted(new) or "none")
+        if cmd == "stage-keys" and not new:
+            print("keys already staged - nothing to do"); return
         last = render("GET", f"/services/{SVC}/deploys?limit=1")[0]["deploy"]["id"]
         for k, v in new.items():
             render("PUT", f"/services/{SVC}/env-vars/{k}", {"value": v})
         render("POST", f"/services/{SVC}/deploys", {})
         print("redeploy:", wait_deploy(since=last))
-        print("LIVE CHECK:", "OK" if regression(folder, "live") else f"FAILED -> deactivate --confirm (or rollback {folder} --confirm)")
+        if cmd == "stage-keys":
+            print("STAGED (sales still OFF):", "OK" if regression(folder, "off") else f"FAILED -> rollback {folder} --confirm")
+        else:
+            print("LIVE CHECK:", "OK" if regression(folder, "live") else f"FAILED -> deactivate --confirm (or rollback {folder} --confirm)")
     elif cmd == "deactivate":
         last = render("GET", f"/services/{SVC}/deploys?limit=1")[0]["deploy"]["id"]
         render("PUT", f"/services/{SVC}/env-vars/SHOP_MODE", {"value": "test"})
