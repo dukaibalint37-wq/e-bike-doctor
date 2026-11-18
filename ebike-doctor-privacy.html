@@ -46,7 +46,7 @@
 </table>
 <p>A Google a Gemini API-n keresztül kapott tartalmat a saját feltételei szerint kezeli.</p>
 
-<p><b>Vásárlás a weboldalon:</b> Lemon Squeezy, LLC (Merchant of Record) – fizetés, számlázás, ÁFA; a kártyaadatokat ő kezeli, a fejlesztő nem látja. A szerver a vásárló nevét, e-mail-címét, a termék- és rendelésazonosítót kapja meg a licenc kiadásához és e-mailes kézbesítéséhez. Visszatérítéskor a licenc visszavonásra kerül.</p>
+<p><b>Vásárlás a weboldalon:</b> Stripe Payments Europe, Ltd. (Írország) – bankkártyás fizetés feldolgozása; a kártyaadatokat a Stripe kezeli, a fejlesztő nem látja. A számlát az eladó állítja ki. A szerver a vásárló nevét, e-mail-címét, a terméket, a fizetés azonosítóját és összegét kapja meg a licenc kiadásához és e-mailes kézbesítéséhez. Visszatérítéskor a licenc visszavonásra kerül.</p>
 <h2>4. Mit tárol a szerver és meddig</h2>
 <ul>
 <li><b>Fényképek:</b> nem tároljuk és nem gyorsítótárazzuk; csak az elemzés idejére kerülnek továbbításra.</li>
@@ -103,7 +103,7 @@
 <tr><td>Upstash, Inc. – Redis</td><td>daily counters, cache of generic answers, AI reports</td><td>Frankfurt (eu-central-1), EU</td></tr>
 </table>
 <p>Google processes content received via the Gemini API under its own terms.</p>
-<p><b>Website purchases:</b> Lemon Squeezy, LLC (merchant of record) – payment, invoicing, VAT; it processes card data, the developer never sees it. The server receives the buyer's name, e-mail, product and order ID to issue the licence and e-mail it. On a refund the licence is revoked.</p>
+<p><b>Website purchases:</b> Stripe Payments Europe, Ltd. (Ireland) – card payment processing; Stripe handles the card data, the developer never sees it. The invoice is issued by the seller. The server receives the buyer's name, e-mail, product, payment ID and amount to issue the licence and e-mail it. On a refund the licence is revoked.</p>
 <h2>4. Server-side storage and retention</h2>
 <ul>
 <li><b>Photos:</b> not stored and not cached; transmitted only for the analysis.</li>
@@ -147,7 +147,7 @@
 </ul>
 <h2>3. Empfänger (Auftragsverarbeiter)</h2>
 <p>Render Services, Inc. (Server-Hosting, Frankfurt/EU) · Google LLC – Gemini API (KI-Antworten und Bildanalyse) · Upstash, Inc. – Redis (Zähler, Cache allgemeiner Antworten, KI-Meldungen; Frankfurt/EU).</p>
-<p><b>Kauf über die Website:</b> Lemon Squeezy, LLC (Merchant of Record) – Zahlung, Rechnung, MwSt.; Kartendaten verarbeitet Lemon Squeezy, der Entwickler sieht sie nicht. Der Server erhält Name, E-Mail, Produkt- und Bestellnummer zur Lizenzausstellung und zum E-Mail-Versand. Bei Erstattung wird die Lizenz widerrufen.</p>
+<p><b>Kauf über die Website:</b> Stripe Payments Europe, Ltd. (Irland) – Verarbeitung der Kartenzahlung; Kartendaten verarbeitet Stripe, der Entwickler sieht sie nicht. Die Rechnung stellt der Verkäufer aus. Der Server erhält Name, E-Mail, Produkt, Zahlungsnummer und -betrag zur Lizenzausstellung und zum E-Mail-Versand. Bei Erstattung wird die Lizenz widerrufen.</p>
 <h2>4. Speicherung auf dem Server</h2>
 <p>Fotos: weder gespeichert noch gecacht. Tageszähler: ca. 25 Stunden. Cache: nur Antworten auf einzelne allgemeine Fragen ohne Messwerte oder personenbezogene Daten, bis 7 Tage. KI-Meldungen: 90 Tage. Logs/Metriken: Fehler und anonyme, aggregierte Leistungsdaten ohne Inhalte.</p>
 <h2>5. Daten auf dem Telefon</h2>
