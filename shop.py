@@ -354,7 +354,7 @@ class Shop:
         params = {"mode": "payment", "line_items": [item], "locale": lang, "submit_type": "pay",
                   "billing_address_collection": "required", "tax_id_collection": {"enabled": True}, "customer_creation": "always",
                   "success_url": self._site_page(self._return_base(origin), lang, "thanks") + "?session_id={CHECKOUT_SESSION_ID}",
-                  "cancel_url": self._site_page(self._return_base(origin), lang, "shop"),
+                  "cancel_url": self._site_page(self._return_base(origin), lang, "shop") + "?payment=cancelled",   # website shows: no charge
                   "metadata": meta, "payment_intent_data": {"metadata": meta}}
         if os.getenv("STRIPE_AUTOMATIC_TAX", "0") == "1":       # only after Stripe Tax is set up in the dashboard
             params["automatic_tax"] = {"enabled": True}

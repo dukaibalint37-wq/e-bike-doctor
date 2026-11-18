@@ -123,7 +123,7 @@ class CheckoutTest(StripeBase):
         self.assertEqual(q["success_url"], "https://ebikedoctorpro.com/de/danke/?session_id={CHECKOUT_SESSION_ID}")
         # manual invoicing: full billing address required, tax ID offered, Customer kept in Stripe
         self.assertEqual((q["billing_address_collection"], q["tax_id_collection[enabled]"], q["customer_creation"]), ("required", "true", "always"))
-        self.assertEqual(q["cancel_url"], "https://ebikedoctorpro.com/de/shop/")
+        self.assertEqual(q["cancel_url"], "https://ebikedoctorpro.com/de/shop/?payment=cancelled")
         self.shop.stripe_checkout("android", "hu", True)
         q = {k: v[0] for k, v in urllib.parse.parse_qs(self.stripe.calls[-1]["body"]).items()}
         self.assertEqual((q["line_items[0][price_data][unit_amount]"], q["metadata[product]"]), ("1499", "EBD-AND"))
@@ -138,7 +138,7 @@ class CheckoutTest(StripeBase):
                 q = {k: v[0] for k, v in urllib.parse.parse_qs(self.stripe.calls[-1]["body"]).items()}
                 return q["success_url"], q["cancel_url"]
             self.assertEqual(urls("http://localhost:8099"), ("http://localhost:8099/hu/koszonjuk/?session_id={CHECKOUT_SESSION_ID}",
-                                                             "http://localhost:8099/hu/webaruhaz/"))
+                                                             "http://localhost:8099/hu/webaruhaz/?payment=cancelled"))
             self.assertTrue(urls("https://evil.example")[0].startswith("https://ebikedoctorpro.com/hu/koszonjuk/"))   # not allowed
             self.assertTrue(urls("")[0].startswith("https://ebikedoctorpro.com/"))
             os.environ["SHOP_MODE"] = "live"; self.shop.stripe = FakeStripe("sk_live_1"); self.stripe = self.shop.stripe
