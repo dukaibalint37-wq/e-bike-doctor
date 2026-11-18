@@ -22,6 +22,11 @@ class FakeStripe(SP.StripeClient):
             raise self.fail
         if method == "POST" and url.endswith("/checkout/sessions"):
             return 200, json.dumps({"id": "cs_test_new", "url": "https://checkout.stripe.com/c/pay/cs_test_new"})
+        if method == "GET" and "/payment_intents/" in url:
+            pid = url.split("/payment_intents/", 1)[1].split("?", 1)[0]
+            if pid in getattr(self, "pis", {}):
+                return 200, json.dumps(self.pis[pid])
+            return 404, json.dumps({"error": {"type": "invalid_request_error", "code": "resource_missing"}})
         if method == "GET" and "/checkout/sessions?" in url:          # list (reconcile)
             return 200, json.dumps({"data": [s for s in self.sessions.values() if s.get("status") == "complete"], "has_more": False})
         sid = url.rsplit("/", 1)[-1]
@@ -304,6 +309,24 @@ class AdaptivePricingTest(StripeBase):
                       "billing_details": {"email": "vevo@example.com"}}, etype="charge.refunded", ev_id="evt_hr")
         self.assertEqual(self.lic.get(r["licences"][0])["status"], "revoked")
         self.assertEqual(self.shop.orders()[0]["refunded_cents"], 1999)
+
+    def test_eur_session_paid_in_huf_on_the_charge_shows_huf_to_the_owner(self):
+        """Shape of the real staging test 2026-11-18: session eur 1499, no currency_conversion, charge presentment 574738 huf."""
+        self.stripe.sessions["cs_test_1"] = session(product="EBD-AND", amount=1499, pi="pi_h2")
+        self.stripe.pis = {"pi_h2": {"id": "pi_h2", "latest_charge": {"id": "ch_1", "amount": 1499, "currency": "eur",
+                                                                      "presentment_details": {"presentment_amount": 574738, "presentment_currency": "huf"}}}}
+        r = self.deliver({"id": "cs_test_1"})
+        self.assertEqual(len(r["licences"]), 1)
+        o = self.shop.orders()[0]
+        self.assertEqual((o["total"], o["currency"], o["paid_currency"], o["paid_total"]), (1499, "EUR", "HUF", 574738))
+        self.assertIn("HUF-ban fizetett: 5747.38 HUF", self.owner_mails()[0]["text"])
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit([c for c in self.stripe.calls if "/payment_intents/" in c["url"]][0]["url"]).query)
+        self.assertEqual(q["expand[0]"], ["latest_charge"])
+
+    def test_charge_lookup_failure_never_blocks_the_licence(self):
+        self.stripe.sessions["cs_test_1"] = session(pi="pi_unknown")             # payment_intents → 404
+        self.assertEqual(len(self.deliver({"id": "cs_test_1"})["licences"]), 1)
+        self.assertNotIn("paid_currency", self.shop.orders()[0])
 
     def test_converted_session_with_wrong_source_amount_is_rejected(self):
         self.stripe.sessions["cs_test_bad"] = self.huf_session(src_amount=100, sid="cs_test_bad", pi="pi_bad")

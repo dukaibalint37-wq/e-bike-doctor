@@ -470,6 +470,17 @@ class Shop:
             pi = pi.get("id") if isinstance(pi, dict) else pi
             if pi:
                 self.store.set("shop:stripe_pi:" + str(pi), sid, 800 * 86_400)
+            if pi and not cc:
+                # Adaptive Pricing variant seen on the account (staging test 2026-11-18): the session stays in EUR and the buyer's
+                # local amount (e.g. 5 747,38 Ft) is only on the charge (presentment_details) - needed for the manual invoice.
+                # Best effort: a failure here never blocks the licence.
+                try:
+                    ch = (self.stripe.request("GET", "/payment_intents/" + str(pi), {"expand": ["latest_charge"]}).get("latest_charge") or {})
+                    pd = ch.get("presentment_details") if isinstance(ch, dict) else None
+                    if isinstance(pd, dict) and str(pd.get("presentment_currency", "")).upper() not in ("", currency):
+                        money.update(paid_currency=str(pd["presentment_currency"]).upper()[:3], paid_total=_cents(pd.get("presentment_amount")))
+                except stripe_pay.StripeError:
+                    pass
             buyer = {"name": (cd.get("name") or "")[:200], "business_name": (cd.get("business_name") or "")[:200],
                      "address": cd.get("address") if isinstance(cd.get("address"), dict) else {},
                      "tax_ids": cd.get("tax_ids") if isinstance(cd.get("tax_ids"), list) else [], "payment_intent": pi or ""}
