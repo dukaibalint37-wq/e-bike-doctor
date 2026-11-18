@@ -191,6 +191,10 @@ def regression(folder, expect_mode):
         out.append((s == 200, f"Stripe LIVE checkout session created -> {s} (open session, no charge; it expires by itself)"))
     s, _, _ = http("POST", "/v1/shop/stripe/webhook", {"id": "evt_forged"}, {"Stripe-Signature": "t=1,v1=00"})
     out.append((s == 401, f"forged Stripe webhook rejected -> {s}"))
+    s, _, _ = http("POST", "/v1/shop/stripe/confirm", {"session_id": "cs_bad../../x"})
+    out.append((s == 422, f"thank-you confirm endpoint present (invalid id 422) -> {s}"))
+    s, _, b = http("POST", "/v1/shop/stripe/confirm", {"session_id": "cs_live_" + "0" * 20})
+    out.append((s == 200, f"thank-you confirm answers without Stripe key / unknown session -> {s} {b[:40]}"))
     s, _, _ = http("POST", "/v1/license/activate", {"license_key": "EBDW-AAAAA-BBBBB-CCCCC-DDDDD", "product": "EBD-WIN", "device_id": "a" * 64, "app_version": "x"})
     out.append((s == 404, f"licence server answers (bogus key 404) -> {s}"))
     for ok, msg in out:
