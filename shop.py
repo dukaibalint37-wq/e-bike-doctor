@@ -208,13 +208,18 @@ class Shop:
             logger.error("Stripe key mode %r does not match SHOP_MODE=%s - checkout refused", self.stripe.mode, self.mode)
             raise LicenseError("not_configured", 503, "Online payment is not available yet")
 
-    def stripe_checkout(self, product, lang):
+    def stripe_checkout(self, product, lang, consent=False):
         prod = PRODUCT_ALIASES.get(str(product or "").strip().lower())
         if prod not in PRICES:
             raise LicenseError("bad_product", 422, "Unknown product")
+        if consent is not True:
+            # EU digital content: express consent to immediate delivery + acknowledgement of losing the withdrawal right
+            # (asked on the website before the redirect); recorded in the session metadata as evidence
+            raise LicenseError("consent_required", 422, "Consent to immediate delivery is required")
         lang = mail_templates.lang_of(lang)
         self._stripe_ready()
-        meta = {"product": prod, "lang": lang, "shop": "ebd-website"}
+        meta = {"product": prod, "lang": lang, "shop": "ebd-website",
+                "withdrawal_waiver": "accepted " + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.clock()))}
         price_id = stripe_price_map().get(prod)
         if price_id:
             item = {"price": price_id, "quantity": 1}

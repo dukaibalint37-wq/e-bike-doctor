@@ -92,7 +92,7 @@ class SignatureTest(unittest.TestCase):
 
 class CheckoutTest(StripeBase):
     def test_one_time_payment_session_with_shop_prices_language_and_return_urls(self):
-        r = self.shop.stripe_checkout("windows", "de")
+        r = self.shop.stripe_checkout("windows", "de", True)
         self.assertEqual(r["url"], "https://checkout.stripe.com/c/pay/cs_test_new")
         call = self.stripe.calls[-1]
         self.assertEqual(call["headers"]["Authorization"], "Bearer sk_test_123")
@@ -105,40 +105,48 @@ class CheckoutTest(StripeBase):
         self.assertNotIn("line_items[0][price_data][recurring][interval]", q)
         self.assertEqual((q["metadata[product]"], q["metadata[lang]"], q["locale"]), ("EBD-WIN", "de", "de"))
         self.assertEqual(q["payment_intent_data[metadata][product]"], "EBD-WIN")
+        self.assertTrue(q["metadata[withdrawal_waiver]"].startswith("accepted 20"))
         self.assertEqual(q["success_url"], "https://ebikedoctorpro.com/de/danke/?session_id={CHECKOUT_SESSION_ID}")
         self.assertEqual(q["cancel_url"], "https://ebikedoctorpro.com/de/shop/")
-        self.shop.stripe_checkout("android", "hu")
+        self.shop.stripe_checkout("android", "hu", True)
         q = {k: v[0] for k, v in urllib.parse.parse_qs(self.stripe.calls[-1]["body"]).items()}
         self.assertEqual((q["line_items[0][price_data][unit_amount]"], q["metadata[product]"]), ("1499", "EBD-AND"))
         self.assertEqual(q["success_url"], "https://ebikedoctorpro.com/hu/koszonjuk/?session_id={CHECKOUT_SESSION_ID}")
 
     def test_dashboard_price_ids_are_used_when_configured(self):
         os.environ["STRIPE_PRICE_MAP"] = '{"EBD-AND":"price_and","EBD-WIN":"bogus"}'
-        self.shop.stripe_checkout("android", "en")
+        self.shop.stripe_checkout("android", "en", True)
         q = {k: v[0] for k, v in urllib.parse.parse_qs(self.stripe.calls[-1]["body"]).items()}
         self.assertEqual(q["line_items[0][price]"], "price_and"); self.assertNotIn("line_items[0][price_data][unit_amount]", q)
-        self.shop.stripe_checkout("windows", "en")                                # invalid id ignored → shop price
+        self.shop.stripe_checkout("windows", "en", True)                                # invalid id ignored → shop price
         q = {k: v[0] for k, v in urllib.parse.parse_qs(self.stripe.calls[-1]["body"]).items()}
         self.assertEqual(q["line_items[0][price_data][unit_amount]"], "1999")
 
     def test_refused_without_key_with_wrong_key_mode_and_unknown_product(self):
         with self.assertRaises(S.LicenseError) as cm:
-            self.shop.stripe_checkout("linux", "en")
+            self.shop.stripe_checkout("linux", "en", True)
         self.assertEqual((cm.exception.code, cm.exception.status), ("bad_product", 422))
         for key in ("", "sk_live_123"):                                          # SHOP_MODE=test: a live key never charges
             self.shop.stripe = FakeStripe(key)
             with self.assertRaises(S.LicenseError) as cm:
-                self.shop.stripe_checkout("windows", "en")
+                self.shop.stripe_checkout("windows", "en", True)
             self.assertEqual(cm.exception.code, "not_configured")
             self.assertEqual(self.shop.stripe.calls, [])
         os.environ["SHOP_MODE"] = "live"; self.shop.stripe = FakeStripe("sk_test_123")
         with self.assertRaises(S.LicenseError):
-            self.shop.stripe_checkout("windows", "en")
+            self.shop.stripe_checkout("windows", "en", True)
+
+    def test_no_checkout_without_consent_to_immediate_delivery(self):
+        for c in (False, None, "yes", 1):
+            with self.assertRaises(S.LicenseError) as cm:
+                self.shop.stripe_checkout("windows", "en", c)
+            self.assertEqual(cm.exception.code, "consent_required")
+        self.assertEqual(self.stripe.calls, [])
 
     def test_stripe_outage_is_a_polite_503(self):
         self.stripe.fail = OSError("down")
         with self.assertRaises(S.LicenseError) as cm:
-            self.shop.stripe_checkout("windows", "en")
+            self.shop.stripe_checkout("windows", "en", True)
         self.assertEqual(cm.exception.code, "payment_unavailable")
 
     def test_status_never_contains_keys(self):

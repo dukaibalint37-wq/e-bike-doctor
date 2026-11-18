@@ -559,13 +559,14 @@ def license_deactivate(req: LicenseKeyRequest):
 class StripeCheckoutRequest(BaseModel):
     product: Literal["windows", "android", "EBD-WIN", "EBD-AND"]
     lang: Literal["hu", "de", "en"] = "en"
+    consent: bool = False          # immediate delivery + loss of the withdrawal right accepted on the website
 
 
 @app.post("/v1/shop/stripe/checkout")
 def stripe_checkout(req: StripeCheckoutRequest):
     """Website buy button → hosted Stripe Checkout (one-time payment). Returns {"url"} to redirect the browser to."""
     try:
-        return SHOP.stripe_checkout(req.product, req.lang)
+        return SHOP.stripe_checkout(req.product, req.lang, req.consent is True)
     except licensing_mod.LicenseError as exc:
         raise _lic_error(exc) from None
 
