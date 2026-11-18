@@ -145,11 +145,11 @@ def backup(label):
     for name, data in files.items():
         with open(os.path.join(folder, name), "x", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
-    open(os.path.join(folder, "GIT_MAIN_COMMIT.txt"), "x").write(main + "\n")
+    open(os.path.join(folder, "GIT_MAIN_COMMIT.txt"), "x", newline="\n").write(main + "\n")
     ver = health().get("version", "unknown")
     git("archive", "--format=zip", "-o", os.path.join(folder, f"backend-main-{ver}.zip"), main)
     sums = [f"{hashlib.sha256(open(os.path.join(folder, n), 'rb').read()).hexdigest()}  {n}" for n in sorted(os.listdir(folder))]
-    open(os.path.join(folder, "SHA256SUMS.txt"), "x").write("\n".join(sums) + "\n")
+    open(os.path.join(folder, "SHA256SUMS.txt"), "x", newline="\n").write("\n".join(sums) + "\n")   # LF, so `sha256sum -c` works
     print(f"backup: {folder} | {len(files['upstash-production-export.json']['keys'])} Upstash keys | {len(e)} env vars | main {main[:7]} | backend {ver}")
     return folder
 
