@@ -279,7 +279,8 @@ def main():
             git("push", "-q", "origin", TAG)
         git("push", "-q", "origin", f"{target}:refs/heads/main")                  # fast-forward only (no --force)
         print("deploy:", wait_deploy(commit=target))
-        print("REGRESSION:", "OK" if regression(folder, "off") else f"FAILED -> rollback {folder} --confirm")
+        mode = "live" if env().get("SHOP_MODE") == "live" else "off"           # code update while selling: checkout must stay ON
+        print("REGRESSION:", "OK" if regression(folder, mode) else f"FAILED -> rollback {folder} --confirm")
     elif cmd in ("stage-keys", "activate"):
         # stage-keys: live keys + webhook secret + owner address onto the server, SHOP_MODE stays "test" -> a live key never
         #   matches the test shop: checkout 503, live events ignored, reconcile skipped = sales still OFF.

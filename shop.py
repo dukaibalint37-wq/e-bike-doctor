@@ -38,7 +38,11 @@ import stripe_pay
 from licensing import PRODUCTS, LicenseError, decrypt_key, email_hash, encrypt_key
 
 logger = logging.getLogger("ebike-doctor.shop")
-PRICES = {"EBD-WIN": ("19.99", "EUR"), "EBD-AND": ("14.99", "EUR")}   # one EUR store, one-time purchases
+PRICES = {"EBD-WIN": ("9.99", "EUR"), "EBD-AND": ("9.99", "EUR")}     # one EUR store, one-time purchases (owner, 2026-11-19)
+# Price change 2026-11-19 (Windows 19.99 -> 9.99, Android 14.99 -> 9.99): a Checkout Session opened BEFORE the change still
+# shows the old price and stays payable for up to 24 h -> its amount is accepted only for sessions created before the cutoff.
+PREVIOUS_PRICE_CENTS = {"EBD-WIN": 1999, "EBD-AND": 1499}
+PRICE_CHANGE_CUTOFF = 1795111200          # 2026-11-19 18:00 UTC (after the deployment of the new price)
 EMAIL_RE = re.compile(r"[^@\s<>\"',;]{1,64}@[A-Za-z0-9.-]{1,180}\.[A-Za-z]{2,24}")
 
 
@@ -452,7 +456,9 @@ class Shop:
             src = cc or s
             currency = str((cc or {}).get("source_currency") or paid_currency).upper()
             if prod not in stripe_price_map():          # inline price: the amount must be exactly the shop price
-                if currency != PRICES[prod][1] or int(src.get("amount_subtotal") or 0) != price_cents(prod):
+                amt = int(src.get("amount_subtotal") or 0)
+                old_ok = amt == PREVIOUS_PRICE_CENTS.get(prod) and int(s.get("created") or 0) < PRICE_CHANGE_CUTOFF
+                if currency != PRICES[prod][1] or (amt != price_cents(prod) and not old_ok):
                     return self._stripe_reject(sid, f"amount mismatch {src.get('amount_subtotal')} {currency}")
             cd = s.get("customer_details") or {}
             email = (cd.get("email") or s.get("customer_email") or "").strip()

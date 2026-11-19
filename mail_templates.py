@@ -6,7 +6,7 @@ LANGS = ("hu", "de", "en")
 NAMES = {"EBD-WIN": {"hu": "E-Bike Doctor PRO – Windows", "de": "E-Bike Doctor PRO – Windows", "en": "E-Bike Doctor PRO – Windows"},
          "EBD-AND": {"hu": "E-Bike Doctor PRO – Android (webshop)", "de": "E-Bike Doctor PRO – Android (Webshop)",
                      "en": "E-Bike Doctor PRO – Android (web shop)"}}
-PRICE = {"EBD-WIN": {"hu": "19,99 €", "de": "19,99 €", "en": "€19.99"}, "EBD-AND": {"hu": "14,99 €", "de": "14,99 €", "en": "€14.99"}}
+PRICE = {"EBD-WIN": {"hu": "9,99 €", "de": "9,99 €", "en": "€9.99"}, "EBD-AND": {"hu": "9,99 €", "de": "9,99 €", "en": "€9.99"}}
 
 
 def lang_of(v):
