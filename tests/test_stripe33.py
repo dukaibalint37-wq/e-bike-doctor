@@ -35,7 +35,7 @@ class FakeStripe(SP.StripeClient):
         return 404, json.dumps({"error": {"type": "invalid_request_error", "code": "resource_missing"}})
 
 
-def session(sid="cs_test_1", product="EBD-WIN", lang="hu", paid=True, live=False, amount=999, currency="eur", email="vevo@example.com",
+def session(sid="cs_test_1", product="EBD-WIN", lang="hu", paid=True, live=False, amount=500, currency="usd", email="vevo@example.com",
             mode="payment", pi="pi_1", created=1_800_000_000):
     return {"id": sid, "object": "checkout.session", "mode": mode, "created": created, "status": "complete" if paid else "open",
             "payment_status": "paid" if paid else "unpaid", "livemode": live, "amount_subtotal": amount, "amount_total": amount,
@@ -113,8 +113,8 @@ class CheckoutTest(StripeBase):
         q = {k: v[0] for k, v in urllib.parse.parse_qs(call["body"]).items()}
         self.assertEqual(q["mode"], "payment")                                    # one-time, never a subscription
         self.assertNotIn("subscription_data", " ".join(q))
-        self.assertEqual(q["line_items[0][price_data][unit_amount]"], "999")
-        self.assertEqual(q["line_items[0][price_data][currency]"], "eur")
+        self.assertEqual(q["line_items[0][price_data][unit_amount]"], "500")
+        self.assertEqual(q["line_items[0][price_data][currency]"], "usd")
         self.assertEqual(q["line_items[0][quantity]"], "1")
         self.assertNotIn("line_items[0][price_data][recurring][interval]", q)
         self.assertEqual((q["metadata[product]"], q["metadata[lang]"], q["locale"]), ("EBD-WIN", "de", "de"))
@@ -126,7 +126,7 @@ class CheckoutTest(StripeBase):
         self.assertEqual(q["cancel_url"], "https://ebikedoctorpro.com/de/shop/?payment=cancelled")
         self.shop.stripe_checkout("android", "hu", True)
         q = {k: v[0] for k, v in urllib.parse.parse_qs(self.stripe.calls[-1]["body"]).items()}
-        self.assertEqual((q["line_items[0][price_data][unit_amount]"], q["metadata[product]"]), ("999", "EBD-AND"))
+        self.assertEqual((q["line_items[0][price_data][unit_amount]"], q["metadata[product]"]), ("500", "EBD-AND"))
         self.assertEqual(q["success_url"], "https://ebikedoctorpro.com/hu/koszonjuk/?session_id={CHECKOUT_SESSION_ID}")
 
     def test_return_urls_follow_an_allowed_origin_only(self):
@@ -153,7 +153,7 @@ class CheckoutTest(StripeBase):
         self.assertEqual(q["line_items[0][price]"], "price_and"); self.assertNotIn("line_items[0][price_data][unit_amount]", q)
         self.shop.stripe_checkout("windows", "en", True)                                # invalid id ignored → shop price
         q = {k: v[0] for k, v in urllib.parse.parse_qs(self.stripe.calls[-1]["body"]).items()}
-        self.assertEqual(q["line_items[0][price_data][unit_amount]"], "999")
+        self.assertEqual(q["line_items[0][price_data][unit_amount]"], "500")
 
     def test_refused_without_key_with_wrong_key_mode_and_unknown_product(self):
         with self.assertRaises(S.LicenseError) as cm:
@@ -206,10 +206,10 @@ class WebhookTest(StripeBase):
         link = re.search(r"https://api\.example/v1/shop/download\?t=\S+", p["text"]).group(0)
         self.assertEqual(self.shop.resolve_download(link.split("t=", 1)[1]), "https://files.example/legacy.exe")   # the Windows installer
         o = self.shop.orders()[0]
-        self.assertEqual((o["provider"], o["total"], o["currency"], o["lang"], o["mode"]), ("stripe", 999, "EUR", "de", "test"))
+        self.assertEqual((o["provider"], o["total"], o["currency"], o["lang"], o["mode"]), ("stripe", 500, "USD", "de", "test"))
 
     def test_android_purchase_gets_the_android_licence(self):
-        self.stripe.sessions["cs_test_a"] = session(sid="cs_test_a", product="EBD-AND", amount=999, lang="en")
+        self.stripe.sessions["cs_test_a"] = session(sid="cs_test_a", product="EBD-AND", amount=500, lang="en")
         r = self.deliver({"id": "cs_test_a"})
         self.assertEqual(self.lic.get(r["licences"][0])["product"], "EBD-AND")
         self.assertIn("EBDA-", self.licence_mails()[0]["payload"]["text"])
@@ -246,7 +246,7 @@ class WebhookTest(StripeBase):
 
     def test_rejections_issue_nothing(self):
         cases = {"cs_test_amount": session(sid="cs_test_amount", amount=100),          # manipulated amount
-                 "cs_test_cur": session(sid="cs_test_cur", currency="usd"),
+                 "cs_test_cur": session(sid="cs_test_cur", currency="eur"),
                  "cs_test_sub": session(sid="cs_test_sub", mode="subscription"),
                  "cs_test_prod": session(sid="cs_test_prod", product="EBD-XXX"),
                  "cs_test_live": session(sid="cs_test_live", live=True),
@@ -290,36 +290,53 @@ class WebhookTest(StripeBase):
 
 
 class PriceChangeTest(StripeBase):
-    """2026-11-19: both products 9.99 EUR. A session opened at the OLD price before the change stays payable (max 24 h)."""
+    """2026-11-20: introductory price 5.00 USD for both products. Sessions opened at an earlier price BEFORE its cutoff stay
+    payable (Stripe keeps a session open for max 24 h); any other amount/currency is rejected and issues no licence."""
     def test_new_price_for_both_products(self):
-        self.assertEqual(S.PRICES, {"EBD-WIN": ("9.99", "EUR"), "EBD-AND": ("9.99", "EUR")})
+        self.assertEqual(S.PRICES, {"EBD-WIN": ("5.00", "USD"), "EBD-AND": ("5.00", "USD")})
         for prod in ("windows", "android"):
             self.shop.stripe_checkout(prod, "hu", True)
             q = {k: v[0] for k, v in urllib.parse.parse_qs(self.stripe.calls[-1]["body"]).items()}
-            self.assertEqual((q["line_items[0][price_data][unit_amount]"], q["line_items[0][price_data][currency]"], q["mode"]), ("999", "eur", "payment"))
+            self.assertEqual((q["line_items[0][price_data][unit_amount]"], q["line_items[0][price_data][currency]"], q["mode"],
+                              q["line_items[0][quantity]"]), ("500", "usd", "payment", "1"))
+            self.assertFalse([k for k in q if k.startswith("subscription_data") or "recurring" in k])
 
-    def test_old_price_session_opened_before_the_change_still_gets_its_licence(self):
-        before = S.PRICE_CHANGE_CUTOFF - 3600
-        for sid, prod, old in (("cs_test_oldw", "EBD-WIN", 1999), ("cs_test_olda", "EBD-AND", 1499)):
-            self.stripe.sessions[sid] = session(sid=sid, product=prod, amount=old, created=before, pi="pi_" + sid)
+    def test_sessions_opened_at_an_earlier_price_before_its_cutoff_still_get_their_licence(self):
+        (c1, _), (c2, _) = S.PRICE_HISTORY
+        cases = (("cs_test_oldw", "EBD-WIN", 1999, "eur", c1 - 3600), ("cs_test_olda", "EBD-AND", 1499, "eur", c1 - 3600),
+                 ("cs_test_9w", "EBD-WIN", 999, "eur", c2 - 60), ("cs_test_9a", "EBD-AND", 999, "eur", c2 - 60))
+        for sid, prod, amt, cur, created in cases:
+            self.stripe.sessions[sid] = session(sid=sid, product=prod, amount=amt, currency=cur, created=created, pi="pi_" + sid)
             self.assertEqual(len(self.deliver({"id": sid}, ev_id="evt_" + sid)["licences"]), 1, sid)
+        self.assertEqual({o["currency"] for o in self.shop.orders()}, {"EUR"})          # booked in the currency actually charged
 
-    def test_old_price_after_the_change_or_any_other_amount_is_rejected(self):
-        after = S.PRICE_CHANGE_CUTOFF + 60
-        cases = {"cs_test_late": session(sid="cs_test_late", amount=1999, created=after, pi="pi_l"),
-                 "cs_test_cross": session(sid="cs_test_cross", product="EBD-AND", amount=1999, created=S.PRICE_CHANGE_CUTOFF - 60, pi="pi_c"),
-                 "cs_test_cheap": session(sid="cs_test_cheap", amount=100, created=S.PRICE_CHANGE_CUTOFF - 60, pi="pi_x")}
+    def test_old_prices_after_their_cutoff_and_any_other_amount_are_rejected(self):
+        (c1, _), (c2, _) = S.PRICE_HISTORY
+        cases = {"cs_test_late": session(sid="cs_test_late", amount=999, currency="eur", created=c2 + 60, pi="pi_l"),
+                 "cs_test_late1": session(sid="cs_test_late1", amount=1999, currency="eur", created=c1 + 60, pi="pi_l1"),
+                 "cs_test_cross": session(sid="cs_test_cross", product="EBD-AND", amount=1999, currency="eur", created=c1 - 60, pi="pi_c"),
+                 "cs_test_eur5": session(sid="cs_test_eur5", amount=500, currency="eur", created=c2 + 60, pi="pi_e"),     # wrong currency
+                 "cs_test_usd999": session(sid="cs_test_usd999", amount=999, currency="usd", created=c2 - 60, pi="pi_u"),
+                 "cs_test_cheap": session(sid="cs_test_cheap", amount=100, currency="usd", created=c2 + 60, pi="pi_x")}
         for i, (sid, sess) in enumerate(cases.items()):
             self.stripe.sessions[sid] = sess
             self.assertIn("amount mismatch", self.deliver({"id": sid}, ev_id=f"evt_p{i}")["ignored"], sid)
         self.assertEqual(self.lic.all(), [])
 
+    def test_usd_price_paid_in_eur_through_adaptive_pricing(self):
+        s = session(sid="cs_test_eurap", currency="eur", amount=462, pi="pi_ap")
+        s["currency_conversion"] = {"source_currency": "usd", "amount_subtotal": 500, "amount_total": 500, "fx_rate": "0.924"}
+        self.stripe.sessions["cs_test_eurap"] = s
+        self.assertEqual(len(self.deliver({"id": "cs_test_eurap"}, ev_id="evt_ap")["licences"]), 1)
+        o = self.shop.orders()[0]
+        self.assertEqual((o["total"], o["currency"], o["paid_currency"], o["paid_total"]), (500, "USD", "EUR", 462))
+
 
 class AdaptivePricingTest(StripeBase):
-    """Buyer pays in HUF through Stripe Adaptive Pricing; the shop price (EUR) is in currency_conversion."""
-    def huf_session(self, src_amount=999, sid="cs_test_huf", pi="pi_huf"):
+    """Buyer pays in HUF through Stripe Adaptive Pricing; the shop price (USD) is in currency_conversion."""
+    def huf_session(self, src_amount=500, sid="cs_test_huf", pi="pi_huf"):
         s = session(sid=sid, currency="huf", amount=799000, pi=pi)
-        s["currency_conversion"] = {"source_currency": "eur", "amount_subtotal": src_amount, "amount_total": src_amount, "fx_rate": "399.7"}
+        s["currency_conversion"] = {"source_currency": "usd", "amount_subtotal": src_amount, "amount_total": src_amount, "fx_rate": "399.7"}
         return s
 
     def test_huf_payment_issues_licence_and_books_eur(self):
@@ -327,24 +344,24 @@ class AdaptivePricingTest(StripeBase):
         r = self.deliver({"id": "cs_test_huf"})
         self.assertEqual(len(r["licences"]), 1)
         o = self.shop.orders()[0]
-        self.assertEqual((o["total"], o["currency"], o["paid_currency"], o["paid_total"]), (999, "EUR", "HUF", 799000))
+        self.assertEqual((o["total"], o["currency"], o["paid_currency"], o["paid_total"]), (500, "USD", "HUF", 799000))
         m = self.owner_mails()[0]
-        self.assertIn("9.99 EUR", m["text"]); self.assertIn("HUF-ban fizetett: 7990.00 HUF", m["text"])
-        # full refund of the HUF charge → revoked, booked as the EUR order total
+        self.assertIn("5.00 USD", m["text"]); self.assertIn("HUF-ban fizetett: 7990.00 HUF", m["text"])
+        # full refund of the HUF charge → revoked, booked as the USD order total
         self.deliver({"id": "ch_h", "amount": 799000, "amount_refunded": 799000, "refunded": True, "currency": "huf", "payment_intent": "pi_huf",
                       "billing_details": {"email": "vevo@example.com"}}, etype="charge.refunded", ev_id="evt_hr")
         self.assertEqual(self.lic.get(r["licences"][0])["status"], "revoked")
-        self.assertEqual(self.shop.orders()[0]["refunded_cents"], 999)
+        self.assertEqual(self.shop.orders()[0]["refunded_cents"], 500)
 
     def test_eur_session_paid_in_huf_on_the_charge_shows_huf_to_the_owner(self):
-        """Shape of the real staging test 2026-11-18: session eur 999, no currency_conversion, charge presentment 574738 huf."""
-        self.stripe.sessions["cs_test_1"] = session(product="EBD-AND", amount=999, pi="pi_h2")
-        self.stripe.pis = {"pi_h2": {"id": "pi_h2", "latest_charge": {"id": "ch_1", "amount": 999, "currency": "eur",
+        """Shape of the real staging test 2026-11-18: session eur 500, no currency_conversion, charge presentment 574738 huf."""
+        self.stripe.sessions["cs_test_1"] = session(product="EBD-AND", amount=500, pi="pi_h2")
+        self.stripe.pis = {"pi_h2": {"id": "pi_h2", "latest_charge": {"id": "ch_1", "amount": 500, "currency": "usd",
                                                                       "presentment_details": {"presentment_amount": 574738, "presentment_currency": "huf"}}}}
         r = self.deliver({"id": "cs_test_1"})
         self.assertEqual(len(r["licences"]), 1)
         o = self.shop.orders()[0]
-        self.assertEqual((o["total"], o["currency"], o["paid_currency"], o["paid_total"]), (999, "EUR", "HUF", 574738))
+        self.assertEqual((o["total"], o["currency"], o["paid_currency"], o["paid_total"]), (500, "USD", "HUF", 574738))
         self.assertIn("HUF-ban fizetett: 5747.38 HUF", self.owner_mails()[0]["text"])
         q = urllib.parse.parse_qs(urllib.parse.urlsplit([c for c in self.stripe.calls if "/payment_intents/" in c["url"]][0]["url"]).query)
         self.assertEqual(q["expand[0]"], ["latest_charge"])
@@ -368,7 +385,7 @@ class OwnerNoticeTest(StripeBase):
         mails = self.owner_mails()
         self.assertEqual(len(mails), 1)
         m = mails[0]
-        self.assertTrue(m["subject"].startswith("[TESZT] Új vásárlás:")); self.assertIn("9.99 EUR", m["subject"])
+        self.assertTrue(m["subject"].startswith("[TESZT] Új vásárlás:")); self.assertIn("5.00 USD", m["subject"])
         for x in ("Vevő Béla", "vevo@example.com", "Fő utca 1., 1011, Budapest, HU", "HU12345678 (eu_vat)", "cs_test_1", "pi_1",
                   "https://dashboard.stripe.com/test/payments/pi_1", "Vásárló nyelve: de", "licenclevél: sent", "TESZTVÁSÁRLÁS"):
             self.assertIn(x, m["text"], x)
@@ -404,39 +421,39 @@ class RefundTest(StripeBase):
         self.lid = self.deliver({"id": "cs_test_1"})["licences"][0]
 
     def charge(self, refunded, full, email="vevo@example.com"):
-        return {"id": "ch_1", "object": "charge", "amount": 999, "amount_refunded": refunded, "refunded": full, "currency": "eur",
+        return {"id": "ch_1", "object": "charge", "amount": 500, "amount_refunded": refunded, "refunded": full, "currency": "usd",
                 "payment_intent": "pi_1", "billing_details": {"email": email}}
 
     def test_partial_refund_keeps_licence_full_refund_revokes_and_notifies(self):
-        r = self.deliver(self.charge(500, False), etype="charge.refunded", ev_id="evt_p")
+        r = self.deliver(self.charge(200, False), etype="charge.refunded", ev_id="evt_p")
         self.assertTrue(r["partial_refund"]); self.assertEqual(self.lic.get(self.lid)["status"], "active")
-        r = self.deliver(self.charge(999, True), etype="charge.refunded", ev_id="evt_f")
+        r = self.deliver(self.charge(500, True), etype="charge.refunded", ev_id="evt_f")
         self.assertEqual(r["revoked"], [self.lid]); self.assertEqual(self.lic.get(self.lid)["status"], "revoked")
         notice = [c["payload"] for c in self.mail.calls if c["payload"]["to"] == ["vevo@example.com"]][-1]   # buyer notice
         self.assertIn("refunded", notice["subject"].lower() + notice["text"].lower()); self.assertIn("Stripe", notice["text"])
         self.assertNotIn("Lemon", notice["text"])
-        self.assertEqual(self.shop.orders()[0]["refunded_cents"], 999)
-        self.assertTrue(self.deliver(self.charge(999, True), etype="charge.refunded", ev_id="evt_f")["duplicate"])
+        self.assertEqual(self.shop.orders()[0]["refunded_cents"], 500)
+        self.assertTrue(self.deliver(self.charge(500, True), etype="charge.refunded", ev_id="evt_f")["duplicate"])
 
     def test_refunds_notify_the_owner_for_the_storno_invoice(self):
-        self.deliver(self.charge(500, False), etype="charge.refunded", ev_id="evt_p")
-        self.deliver(self.charge(999, True), etype="charge.refunded", ev_id="evt_f")
+        self.deliver(self.charge(200, False), etype="charge.refunded", ev_id="evt_p")
+        self.deliver(self.charge(500, True), etype="charge.refunded", ev_id="evt_f")
         subj = [m["subject"] for m in self.owner_mails()]
-        self.assertTrue(any("Részleges visszatérítés: 5.00 EUR" in x for x in subj), subj)
+        self.assertTrue(any("Részleges visszatérítés: 2.00 USD" in x for x in subj), subj)
         full = [m for m in self.owner_mails() if "TELJES" in m["subject"]][0]
-        self.assertIn("Licenc visszavonva: " + self.lid, full["text"]); self.assertIn("9.99 EUR / 9.99 EUR", full["text"])
+        self.assertIn("Licenc visszavonva: " + self.lid, full["text"]); self.assertIn("5.00 USD / 5.00 USD", full["text"])
 
     def test_failed_refund_and_chargebacks(self):
-        self.deliver(self.charge(999, True), etype="charge.refunded", ev_id="evt_f")
-        r = self.deliver({"id": "re_1", "object": "refund", "status": "failed", "failure_reason": "expired_or_canceled_card", "amount": 999,
-                          "currency": "eur", "payment_intent": "pi_1"}, etype="charge.refund.updated", ev_id="evt_rf")
+        self.deliver(self.charge(500, True), etype="charge.refunded", ev_id="evt_f")
+        r = self.deliver({"id": "re_1", "object": "refund", "status": "failed", "failure_reason": "expired_or_canceled_card", "amount": 500,
+                          "currency": "usd", "payment_intent": "pi_1"}, etype="charge.refund.updated", ev_id="evt_rf")
         self.assertTrue(r["refund_failed"])
         self.assertIn("SIKERTELEN visszatérítés (failed)", self.owner_mails()[-1]["subject"])
         self.assertEqual(self.deliver({"id": "re_2", "status": "succeeded", "payment_intent": "pi_1"}, etype="charge.refund.updated",
                                       ev_id="evt_rs")["ignored"], "refund succeeded")
 
     def test_dispute_opened_keeps_licence_lost_revokes(self):
-        d = {"id": "dp_1", "object": "dispute", "amount": 999, "currency": "eur", "payment_intent": "pi_1", "reason": "fraudulent"}
+        d = {"id": "dp_1", "object": "dispute", "amount": 500, "currency": "usd", "payment_intent": "pi_1", "reason": "fraudulent"}
         self.deliver(dict(d, status="needs_response"), etype="charge.dispute.created", ev_id="evt_d1")
         self.assertEqual(self.lic.get(self.lid)["status"], "active")
         self.assertIn("Chargeback (needs_response)", self.owner_mails()[-1]["subject"])
@@ -445,12 +462,12 @@ class RefundTest(StripeBase):
         self.assertIn("sztornó", self.owner_mails()[-1]["text"])
 
     def test_refund_without_billing_email_reads_the_session(self):
-        self.deliver(self.charge(999, True, email=""), etype="charge.refunded", ev_id="evt_f")
+        self.deliver(self.charge(500, True, email=""), etype="charge.refunded", ev_id="evt_f")
         self.assertTrue(any("refunded" in c["payload"]["subject"].lower() + c["payload"]["text"].lower()
                             for c in self.mail.calls if c["payload"]["to"] == ["vevo@example.com"]))
 
     def test_refund_of_unknown_payment_is_ignored(self):
-        c = dict(self.charge(999, True), payment_intent="pi_other")
+        c = dict(self.charge(500, True), payment_intent="pi_other")
         self.assertEqual(self.deliver(c, etype="charge.refunded", ev_id="evt_u")["ignored"], "unknown payment")
         self.assertEqual(self.lic.get(self.lid)["status"], "active")
 

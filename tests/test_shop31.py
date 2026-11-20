@@ -142,8 +142,8 @@ class PurchaseMailTest(Base):
 
 class PriceTest(Base):
     def test_both_products_are_one_time_eur_prices_in_every_language(self):
-        self.assertEqual(S.PRICES, {"EBD-WIN": ("9.99", "EUR"), "EBD-AND": ("9.99", "EUR")})
-        want = {"EBD-WIN": {"hu": "9,99 €", "de": "9,99 €", "en": "€9.99"}, "EBD-AND": {"hu": "9,99 €", "de": "9,99 €", "en": "€9.99"}}
+        self.assertEqual(S.PRICES, {"EBD-WIN": ("5.00", "USD"), "EBD-AND": ("5.00", "USD")})
+        want = {"EBD-WIN": {"hu": "5,00 USD", "de": "5,00 USD", "en": "USD 5.00"}, "EBD-AND": {"hu": "5,00 USD", "de": "5,00 USD", "en": "USD 5.00"}}
         for prod, langs in want.items():
             for lang, price in langs.items():
                 _, text, html = MT.purchase(prod, lang, "", "EBDX-AAAAA-BBBBB-CCCCC-DDDDD", "https://x/dl", False)

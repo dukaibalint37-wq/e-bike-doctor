@@ -38,11 +38,14 @@ import stripe_pay
 from licensing import PRODUCTS, LicenseError, decrypt_key, email_hash, encrypt_key
 
 logger = logging.getLogger("ebike-doctor.shop")
-PRICES = {"EBD-WIN": ("9.99", "EUR"), "EBD-AND": ("9.99", "EUR")}     # one EUR store, one-time purchases (owner, 2026-11-19)
-# Price change 2026-11-19 (Windows 19.99 -> 9.99, Android 14.99 -> 9.99): a Checkout Session opened BEFORE the change still
-# shows the old price and stays payable for up to 24 h -> its amount is accepted only for sessions created before the cutoff.
-PREVIOUS_PRICE_CENTS = {"EBD-WIN": 1999, "EBD-AND": 1499}
-PRICE_CHANGE_CUTOFF = 1795111200          # 2026-11-19 18:00 UTC (after the deployment of the new price)
+PRICES = {"EBD-WIN": ("5.00", "USD"), "EBD-AND": ("5.00", "USD")}     # introductory price, one-time purchases (owner, 2026-11-20)
+# Price changes: a Checkout Session opened BEFORE a change still shows the old price and stays payable for up to 24 h -> an
+# old (amount, currency) is accepted only for sessions created before that change's cutoff. Every other amount is rejected.
+#   (cutoff unix time, {product: (cents, currency)} valid until that cutoff)
+PRICE_HISTORY = (
+    (1795111200, {"EBD-WIN": (1999, "EUR"), "EBD-AND": (1499, "EUR")}),   # until 2026-11-19 18:00 UTC: 19.99 / 14.99 EUR
+    (1795219200, {"EBD-WIN": (999, "EUR"), "EBD-AND": (999, "EUR")}),     # until 2026-11-21 00:00 UTC: 9.99 EUR (USD live 2026-11-20)
+)
 EMAIL_RE = re.compile(r"[^@\s<>\"',;]{1,64}@[A-Za-z0-9.-]{1,180}\.[A-Za-z]{2,24}")
 
 
@@ -91,6 +94,15 @@ def product_map():
 
 PRODUCT_ALIASES = {"windows": "EBD-WIN", "win": "EBD-WIN", "ebd-win": "EBD-WIN", "android": "EBD-AND", "and": "EBD-AND", "ebd-and": "EBD-AND"}
 STRIPE_PAID_EVENTS = ("checkout.session.completed", "checkout.session.async_payment_succeeded")
+
+
+def price_accepted(product, cents, currency, created):
+    """True for the current shop price, or for an earlier price on a session created before that price's cutoff."""
+    if product not in PRICES:
+        return False
+    if (cents, currency) == (price_cents(product), PRICES[product][1]):
+        return True
+    return any(created < cutoff and old.get(product) == (cents, currency) for cutoff, old in PRICE_HISTORY)
 
 
 def price_cents(product):
@@ -450,15 +462,13 @@ class Shop:
             if prod not in PRICES or meta.get("shop") != "ebd-website":
                 return self._stripe_reject(sid, "unknown product")
             # Adaptive Pricing: the buyer may pay in a local currency (e.g. HUF). The shop price and the bookkeeping amounts are
-            # then in currency_conversion (source currency = EUR); the session amounts are the converted presentment amounts.
+            # then in currency_conversion (source currency = the shop currency); the session amounts are the converted presentment amounts.
             cc = s.get("currency_conversion") if isinstance(s.get("currency_conversion"), dict) else None
             paid_currency, paid_total = str(s.get("currency", "") or "").upper(), _cents(s.get("amount_total"))
             src = cc or s
             currency = str((cc or {}).get("source_currency") or paid_currency).upper()
             if prod not in stripe_price_map():          # inline price: the amount must be exactly the shop price
-                amt = int(src.get("amount_subtotal") or 0)
-                old_ok = amt == PREVIOUS_PRICE_CENTS.get(prod) and int(s.get("created") or 0) < PRICE_CHANGE_CUTOFF
-                if currency != PRICES[prod][1] or (amt != price_cents(prod) and not old_ok):
+                if not price_accepted(prod, int(src.get("amount_subtotal") or 0), currency, int(s.get("created") or 0)):
                     return self._stripe_reject(sid, f"amount mismatch {src.get('amount_subtotal')} {currency}")
             cd = s.get("customer_details") or {}
             email = (cd.get("email") or s.get("customer_email") or "").strip()
