@@ -36,6 +36,7 @@ import mailer as mailer_mod
 import mail_templates as mailer_templates
 import s3presign
 import shop as shop_mod
+import trial as trial_mod
 from store import make_store
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -48,11 +49,11 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
 BURST_LIMIT = int(os.getenv("RATE_LIMIT_PER_10_MINUTES", "30"))
 WINDOW_SECONDS = 600
 LIMITED_PREFIXES = ("/v1/diagnose", "/v1/vision-diagnose", "/v1/chat", "/v1/smart-diagnose", "/v1/register", "/v1/report", "/v1/license", "/v1/shop",
-                    "/v1/interest", "/v1/admin/login")
+                    "/v1/interest", "/v1/trial", "/v1/admin/login")
 ENDPOINTS = ["/health", "/v1/register", "/v1/quota", "/v1/diagnose", "/v1/diagnose/stream", "/v1/smart-diagnose",
              "/v1/smart-diagnose/stream", "/v1/vision-diagnose", "/v1/chat", "/v1/chat/stream", "/v1/metrics", "/v1/report",
              "/v1/license/activate", "/v1/license/refresh", "/v1/license/deactivate", "/v1/shop/stripe/checkout", "/v1/shop/stripe/confirm", "/v1/shop/stripe/webhook", "/v1/shop/lemonsqueezy/webhook", "/v1/shop/download",
-             "/v1/shop/download-link", "/v1/shop/resend", "/v1/interest", "/v1/app/update"]
+             "/v1/shop/download-link", "/v1/shop/resend", "/v1/shop/promo", "/v1/interest", "/v1/trial/request", "/v1/trial/confirm", "/v1/app/update"]
 # Browser access for the website forms only (the apps are not browsers and are unaffected). Empty = no CORS at all.
 CORS_ORIGINS = [o.strip().rstrip("/") for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 if CORS_ORIGINS:
@@ -80,6 +81,7 @@ def _resolve_ai_subject(iid):
 QUOTA.subject_resolver = _resolve_ai_subject
 SHOP = shop_mod.Shop(LIC_STORE, LICENSES, MAILER)
 INTEREST = interest_mod.InterestList(LIC_STORE, MAILER)
+TRIAL = trial_mod.TrialService(LIC_STORE, LICENSES, SHOP, MAILER)
 ADMIN_AUTH = admin_auth.AdminAuth(LIC_STORE)
 VISITS = analytics.Visits(STORE)
 CACHE = answer_cache.AnswerCache(STORE)
@@ -560,13 +562,34 @@ class StripeCheckoutRequest(BaseModel):
     product: Literal["windows", "android", "EBD-WIN", "EBD-AND"]
     lang: Literal["hu", "de", "en"] = "en"
     consent: bool = False          # immediate delivery + loss of the withdrawal right accepted on the website
+    promo: str = Field(default="", max_length=40)     # website promotion code (EBIKE-50) → one Stripe coupon
+
+
+class PromoRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=40)
+    product: Literal["windows", "android", "EBD-WIN", "EBD-AND"]
+
+
+@app.post("/v1/shop/promo")
+def shop_promo(req: PromoRequest):
+    """Website "Redeem": validates a promotion code and returns the discounted price shown BEFORE the Stripe page.
+    The trial code (EBIKE-TRIAL2) is answered with kind=trial so the website opens the free-trial form instead."""
+    if trial_mod.normalize_code(req.code) == trial_mod.trial_code():
+        if not TRIAL.enabled:
+            raise _lic_error(licensing_mod.LicenseError("trial_unavailable", 503, "The free trial is not available right now"))
+        return {"kind": "trial", "code": trial_mod.trial_code(), "hours": TRIAL.hours}
+    try:
+        q = SHOP.promo_quote(req.product, req.code)
+    except licensing_mod.LicenseError as exc:
+        raise _lic_error(exc) from None
+    return {"kind": "discount", **{k: v for k, v in q.items() if k != "coupon"}}
 
 
 @app.post("/v1/shop/stripe/checkout")
 def stripe_checkout(req: StripeCheckoutRequest, request: Request):
     """Website buy button → hosted Stripe Checkout (one-time payment). Returns {"url"} to redirect the browser to."""
     try:
-        r = SHOP.stripe_checkout(req.product, req.lang, req.consent is True, request.headers.get("origin", ""))
+        r = SHOP.stripe_checkout(req.product, req.lang, req.consent is True, request.headers.get("origin", ""), promo=req.promo)
         _reconcile_soon()
         return r
     except licensing_mod.LicenseError as exc:
@@ -705,6 +728,45 @@ def interest_unsubscribe(t: str = ""):
     except licensing_mod.LicenseError:
         return _interest_page("invalid", "en", 503)
     return _interest_page(result, lang or "en", 200 if result == "unsubscribed" else 404)
+
+
+# ---------------------------------------------------------------------------- free 48-hour trial (EBIKE-TRIAL2)
+class TrialRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=200)
+    product: Literal["windows", "android", "EBD-WIN", "EBD-AND"]
+    lang: Literal["hu", "de", "en"] = "en"
+    code: str = Field(default="", max_length=40)
+    consent: bool = False
+    website: str = Field(default="", max_length=200)      # honeypot – must stay empty
+
+
+@app.post("/v1/trial/request")
+def trial_request(req: TrialRequest, request: Request):
+    try:
+        return TRIAL.request(req.email, req.product, req.lang, req.code, req.consent, quota_mod.ip_hash(client_ip(request)), honeypot=req.website)
+    except licensing_mod.LicenseError as exc:
+        raise _lic_error(exc) from None
+
+
+@app.get("/v1/trial/confirm")
+def trial_confirm_page(t: str = ""):
+    """GET only shows the "Start the trial" button (mail scanners prefetch links); the POST below issues the licence."""
+    try:
+        lang, kind = TRIAL.check(t)
+    except licensing_mod.LicenseError:
+        lang, kind = "en", "unavailable"
+    status = 200 if kind == "ask" else (503 if kind == "unavailable" else 404)
+    return HTMLResponse(trial_mod.page(kind, lang, form_action="/v1/trial/confirm?t=" + t), status_code=status, headers=PAGE_CSP)
+
+
+@app.post("/v1/trial/confirm")
+def trial_confirm(t: str = ""):
+    try:
+        lang, kind, data = TRIAL.confirm(t)
+    except licensing_mod.LicenseError:
+        lang, kind, data = "en", "unavailable", {}
+    status = {"issued": 200, "used": 409, "unavailable": 503}.get(kind, 404)
+    return HTMLResponse(trial_mod.page(kind, lang, data), status_code=status, headers=PAGE_CSP)
 
 
 UPDATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "updates")
@@ -862,6 +924,13 @@ def admin_session(request: Request = None):
     return {"configured": ADMIN_AUTH.configured, "ok": bool(cookie and ADMIN_AUTH.session_valid(cookie))}
 
 
+def _safe(fn):
+    try:
+        return fn()
+    except licensing_mod.LicenseError:
+        return {"error": "store_unavailable"}
+
+
 @app.get("/v1/admin/dashboard")
 def admin_dashboard(mode: str = "live", x_admin_token: Optional[str] = Header(default=None), request: Request = None):
     _admin(x_admin_token, request)
@@ -878,7 +947,8 @@ def admin_dashboard(mode: str = "live", x_admin_token: Optional[str] = Header(de
             "downloads_daily": SHOP.downloads_daily(30), "visits": VISITS.report(30),
             "ai": {**QUOTA.usage(31), "access_mode": QUOTA.access_mode(), "ai_public": os.getenv("AI_PUBLIC", "0").strip() == "1",
                    "daily_limit_per_licence": QUOTA.daily_limit, "provider": provider_name()},
-            "interest": interest_stats,
+            "interest": interest_stats, "trial": _safe(TRIAL.stats),
+            "promo": {c: {"configured": bool(os.getenv(p["coupon_env"], "").strip()), "percent": p["percent"]} for c, p in shop_mod.PROMOS.items()},
             "config": {"shop_mode": SHOP.mode, "mail_provider": MAILER.provider, "mail_configured": MAILER.configured, "mail_chain": MAILER.chain(),
                        "download_bucket": s3presign.configured(), "lease_signing": LICENSES.lease.available,
                        "mail_health": mailer_mod.health(STORE),

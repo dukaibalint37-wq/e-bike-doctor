@@ -13,6 +13,11 @@ Design (see LICENSZERVER_HU.md):
   expires by itself (at most LEASE_DAYS).
 - There is no master key: every licence is an individual record; owner licences are ordinary records with owner=True.
 - AI: the licence-bound AI token's quota subject is the LICENCE (not the install) → reinstalling does not reset the daily 50.
+- Free trial (EBIKE-TRIAL2, trial.py): an ordinary licence record with a "trial" block. The trial window (default 48 h) starts
+  at the FIRST successful activation and is enforced by the server: the lease never outlives it (exp = trial end, ed=TRIAL),
+  refresh/activate/AI/downloads are refused after it (403 trial_expired). One trial per device and product
+  (trial:dev:<product>:<device hash>), no device transfer. Reinstalling or changing the PC/phone clock cannot restart it:
+  the start time lives on the server and the device hash survives a reinstall.
 """
 import base64
 import hashlib
@@ -228,8 +233,8 @@ class LicenseService:
         rec.setdefault("history", []).append({"t": int(self.clock()), "e": event, **kw})
         rec["history"] = rec["history"][-50:]
 
-    # ---- creation (webhook / admin)
-    def create(self, product, email="", name="", owner=False, test=False, source="admin", order_id=""):
+    # ---- creation (webhook / admin / trial)
+    def create(self, product, email="", name="", owner=False, test=False, source="admin", order_id="", trial_hours=0, campaign=""):
         if product not in PRODUCTS:
             raise LicenseError("bad_product", 422, "Unknown product")
         if order_id:
@@ -247,6 +252,8 @@ class LicenseService:
                "source": source, "order_id": str(order_id or ""), "created": int(self.clock()), "key_hint": norm[-4:],
                "key_hash": key_hash(norm), "key_enc": encrypt_key(key, lid), "lang": "", "device": None, "transfers": [],
                "activations": 0}
+        if trial_hours:
+            rec["trial"] = {"hours": trial_hours, "campaign": (campaign or "")[:40], "started": None, "expires": None}
         self._log(rec, "created", source=source)
         self.store.set("lic:k:" + rec["key_hash"], lid, TTL)
         if email:
@@ -265,16 +272,34 @@ class LicenseService:
             raise LicenseError("invalid_key", 404, "Invalid licence key")
         return rec
 
+    # ---- trial helpers
+    def trial_expired(self, rec, now=None):
+        """True only for a started trial whose window has passed (an unstarted trial is not expired)."""
+        t = trial_of(rec)
+        return bool(t and t.get("expires") and (self.clock() if now is None else now) >= t["expires"])
+
+    def check_trial_usable(self, rec):
+        """Raises trial_expired for an expired trial licence (downloads, AI, refresh)."""
+        if self.trial_expired(rec):
+            raise LicenseError("trial_expired", 403, "The free trial has ended - buy the PRO licence to continue")
+
     # ---- client operations
     def _lease_for(self, rec, device_hash):
         now = int(self.clock())
+        exp = now + _int("LEASE_DAYS", 14) * DAY
+        t = trial_of(rec)
+        ed = "OWNER" if rec.get("owner") else "PRO"
+        if t:
+            exp, ed = min(exp, int(t["expires"])), "TRIAL"      # the offline lease never outlives the trial window
         payload = {"v": 1, "lid": rec["lid"], "prod": rec["product"], "dev": device_hash, "iat": now,
-                   "exp": now + _int("LEASE_DAYS", 14) * DAY, "ed": "OWNER" if rec.get("owner") else "PRO",
-                   "owner": bool(rec.get("owner")), "name": rec.get("name", "")[:60]}
-        return {"lease": self.lease.sign(payload), "lease_expires": payload["exp"],
-                "ai_token": self.quota_signer.issue(f"lic-{rec['lid']}-{device_hash[:8]}"),
-                "license": {"id": rec["lid"], "product": rec["product"], "edition": payload["ed"], "name": rec.get("name", ""),
-                            "transfers_left": self._transfers_left(rec)}}
+                   "exp": exp, "ed": ed, "owner": bool(rec.get("owner")), "name": rec.get("name", "")[:60]}
+        out = {"lease": self.lease.sign(payload), "lease_expires": payload["exp"],
+               "ai_token": self.quota_signer.issue(f"lic-{rec['lid']}-{device_hash[:8]}"),
+               "license": {"id": rec["lid"], "product": rec["product"], "edition": payload["ed"], "name": rec.get("name", ""),
+                           "transfers_left": 0 if t else self._transfers_left(rec)}}
+        if t:
+            out["license"]["trial_expires"] = int(t["expires"])
+        return out
 
     def _transfers_left(self, rec):
         recent = [t for t in rec.get("transfers", []) if self.clock() - t < 30 * DAY]
@@ -290,6 +315,19 @@ class LicenseService:
             raise LicenseError("revoked", 403, "This licence has been revoked")
         dev = rec.get("device")
         now = int(self.clock())
+        t = trial_of(rec)
+        if t:
+            self.check_trial_usable(rec)
+            if dev and dev.get("hash") != device_hash:
+                # a trial stays on its first device: no transfer (otherwise one e-mail = a new 48 h on every device)
+                raise LicenseError("trial_device", 409, "This trial is already active on another device")
+            used = self.store.get(f"trial:dev:{rec['product']}:{device_hash}")
+            if used and used != rec["lid"]:
+                raise LicenseError("trial_used", 409, "The free trial has already been used on this device")
+            if not t.get("started"):
+                t["started"], t["expires"] = now, now + int(float(t["hours"]) * 3600)
+                self.store.set(f"trial:dev:{rec['product']}:{device_hash}", rec["lid"], TTL)
+                self._log(rec, "trial_started", dev=device_hash[:8], hours=t["hours"])
         if dev and dev.get("hash") != device_hash:
             if not transfer:
                 raise LicenseError("device_limit", 409, "This licence is already active on another device")
@@ -330,6 +368,8 @@ class LicenseService:
         rec = self._get(m.group(1))
         if not rec or rec.get("status") != "active" or not rec.get("device") or not rec["device"].get("hash", "").startswith(m.group(2)):
             return None
+        if self.trial_expired(rec):
+            return None                       # trial over: no more AI on the old token either
         return "lic-" + m.group(1)
 
     # ---- admin
@@ -406,13 +446,19 @@ class LicenseService:
         """mode None = everything (legacy), 'live' = real licences only (owner licences included), 'test' = test licences.
         Purged test licences are never counted (only in 'purged')."""
         recs = self.all()
-        out = {p: {"total": 0, "active": 0, "revoked": 0, "activated_devices": 0, "owner": 0, "test": 0, "purged": 0} for p in PRODUCTS}
+        out = {p: {"total": 0, "active": 0, "revoked": 0, "activated_devices": 0, "owner": 0, "test": 0, "purged": 0,
+                   "trials": 0, "trials_started": 0, "trials_expired": 0} for p in PRODUCTS}
         for r in recs:
             s = out[r["product"]]
             if r.get("purged"):
                 s["purged"] += 1
                 continue
             if mode == "live" and r.get("test") or mode == "test" and not r.get("test"):
+                continue
+            if trial_of(r):                   # free trials are not sales: counted separately
+                s["trials"] += 1
+                s["trials_started"] += 1 if trial_of(r).get("started") else 0
+                s["trials_expired"] += 1 if self.trial_expired(r) else 0
                 continue
             s["total"] += 1
             s["revoked" if r["status"] != "active" else "active"] += 1
@@ -422,10 +468,15 @@ class LicenseService:
         return out
 
 
+def trial_of(rec):
+    t = (rec or {}).get("trial")
+    return t if isinstance(t, dict) and t.get("hours") else None
+
+
 def public_view(rec):
     """Admin listing – never contains the key or key hash."""
     return {k: rec.get(k) for k in ("lid", "product", "status", "owner", "test", "purged", "email_masked", "name", "source", "order_id",
-                                    "created", "revoked_at", "revoke_reason", "key_hint", "activations")} | {
+                                    "created", "revoked_at", "revoke_reason", "key_hint", "activations", "trial")} | {
         "device": ({"name": rec["device"].get("name", ""), "id": rec["device"]["hash"][:8], "since": rec["device"].get("since"),
                     "last_seen": rec["device"].get("last_seen"), "app": rec["device"].get("app", "")} if rec.get("device") else None),
         "transfers_30d": len([t for t in rec.get("transfers", []) if time.time() - t < 30 * DAY]),

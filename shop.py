@@ -47,6 +47,15 @@ PRICE_HISTORY = (
     (1795219200, {"EBD-WIN": (999, "EUR"), "EBD-AND": (999, "EUR")}),     # until 2026-11-21 00:00 UTC: 9.99 EUR (USD live 2026-11-20)
 )
 EMAIL_RE = re.compile(r"[^@\s<>\"',;]{1,64}@[A-Za-z0-9.-]{1,180}\.[A-Za-z]{2,24}")
+# Promotion codes typed on the website (owner, 2026-11-22). Each maps to a Stripe COUPON (percent_off) whose id is in the env
+# variable: the discount is applied by Stripe Checkout itself (original price, the discount line and the total are shown
+# before paying). One code per purchase: the session gets exactly one discount and allow_promotion_codes is never set, so
+# nothing can be stacked. Without the coupon id the code is "not available" (never silently ignored).
+PROMOS = {"EBIKE-50": {"percent": 50, "coupon_env": "STRIPE_COUPON_EBIKE50"}}
+
+
+def normalize_promo(code):
+    return re.sub(r"\s+", "", str(code or "")).upper()[:40]
 
 
 def _int(name, default):
@@ -346,10 +355,28 @@ class Shop:
     def _site_page(self, base, lang, page):
         return (base + mail_templates.SITE_PAGES[page][lang]) if base else mail_templates.site_url(lang, page)
 
-    def stripe_checkout(self, product, lang, consent=False, origin=""):
+    def promo_quote(self, product, code):
+        """Website "Redeem" button: the discounted price BEFORE the Stripe page (the same coupon is applied by Checkout)."""
+        prod = PRODUCT_ALIASES.get(str(product or "").strip().lower()) or (product if product in PRICES else None)
+        if prod not in PRICES:
+            raise LicenseError("bad_product", 422, "Unknown product")
+        c = normalize_promo(code)
+        p = PROMOS.get(c)
+        if not p:
+            raise LicenseError("invalid_promo", 422, "Unknown promotion code")
+        coupon = os.getenv(p["coupon_env"], "").strip()
+        if not coupon:
+            raise LicenseError("promo_unavailable", 503, "This promotion code is not available right now")
+        cents = price_cents(prod)
+        off = round(cents * p["percent"] / 100)
+        return {"code": c, "product": prod, "percent": p["percent"], "currency": PRICES[prod][1], "original_cents": cents,
+                "discount_cents": off, "total_cents": cents - off, "coupon": coupon}
+
+    def stripe_checkout(self, product, lang, consent=False, origin="", promo=""):
         prod = PRODUCT_ALIASES.get(str(product or "").strip().lower())
         if prod not in PRICES:
             raise LicenseError("bad_product", 422, "Unknown product")
+        quote = self.promo_quote(prod, promo) if normalize_promo(promo) else None
         if consent is not True:
             # EU digital content: express consent to immediate delivery + acknowledgement of losing the withdrawal right
             # (asked on the website before the redirect); recorded in the session metadata as evidence
@@ -358,6 +385,8 @@ class Shop:
         self._stripe_ready()
         meta = {"product": prod, "lang": lang, "shop": "ebd-website",
                 "withdrawal_waiver": "accepted " + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.clock()))}
+        if quote:
+            meta["promo"] = quote["code"]
         price_id = stripe_price_map().get(prod)
         if price_id:
             item = {"price": price_id, "quantity": 1}
@@ -372,6 +401,8 @@ class Shop:
                   "success_url": self._site_page(self._return_base(origin), lang, "thanks") + "?session_id={CHECKOUT_SESSION_ID}",
                   "cancel_url": self._site_page(self._return_base(origin), lang, "shop") + "?payment=cancelled",   # website shows: no charge
                   "metadata": meta, "payment_intent_data": {"metadata": meta}}
+        if quote:
+            params["discounts"] = [{"coupon": quote["coupon"]}]     # exactly one discount; Checkout shows it before paying
         if os.getenv("STRIPE_AUTOMATIC_TAX", "0") == "1":       # only after Stripe Tax is set up in the dashboard
             params["automatic_tax"] = {"enabled": True}
         if os.getenv("STRIPE_INVOICE", "0") == "1":             # Stripe-hosted invoice PDF (extra Stripe fee)
@@ -387,6 +418,8 @@ class Shop:
             raise LicenseError("payment_unavailable", 503, "The payment page could not be opened - please try again later")
         day = time.strftime("%Y%m%d", time.gmtime(self.clock()))
         self.store.incr(f"shop:checkouts:{day}:{prod}:{self.mode}", 400 * 86_400)
+        if quote:
+            self.store.incr(f"shop:checkouts_promo:{day}:{quote['code']}:{self.mode}", 400 * 86_400)
         return {"url": s["url"], "id": s.get("id", "")}
 
     def handle_stripe_webhook(self, raw: bytes, sig_header: str):
@@ -470,11 +503,20 @@ class Shop:
             if prod not in stripe_price_map():          # inline price: the amount must be exactly the shop price
                 if not price_accepted(prod, int(src.get("amount_subtotal") or 0), currency, int(s.get("created") or 0)):
                     return self._stripe_reject(sid, f"amount mismatch {src.get('amount_subtotal')} {currency}")
+            td = s.get("total_details") or {}
+            # a discount is only valid as the website promotion recorded in the metadata, at its exact percentage
+            # (checked on the session's own amounts, so it also holds for an Adaptive Pricing presentment currency)
+            disc, sub = _cents(td.get("amount_discount")), _cents(s.get("amount_subtotal"))
+            if disc:
+                pr = PROMOS.get(normalize_promo(meta.get("promo")))
+                if not pr:
+                    return self._stripe_reject(sid, f"unexpected discount {disc}")
+                if abs(disc * 100 - sub * pr["percent"]) > max(100, sub):          # tolerance: 1 cent or 1 %
+                    return self._stripe_reject(sid, f"discount {disc} of {sub} is not {pr['percent']}%")
             cd = s.get("customer_details") or {}
             email = (cd.get("email") or s.get("customer_email") or "").strip()
             if not EMAIL_RE.fullmatch(email):
                 return self._stripe_reject(sid, "no valid buyer e-mail")
-            td = s.get("total_details") or {}
             total = _cents(src.get("amount_total"))
             scale = (lambda v: round(_cents(v) * total / paid_total)) if cc and paid_total else _cents   # presentment → source currency
             money = {"total": total, "subtotal": _cents(src.get("amount_subtotal")), "tax": scale(td.get("amount_tax")),
@@ -830,6 +872,7 @@ class Shop:
         rec = self.licenses.get(lid)
         if rec["status"] != "active" or rec["product"] != product:
             raise LicenseError("revoked", 403, "Licence is not active")
+        self.licenses.check_trial_usable(rec)        # trial: installer available until the trial ends
         # private bucket (pre-signed, a few minutes) preferred; a plain DOWNLOAD_URL_* is the legacy fallback
         url = s3presign.object_url(product) or os.getenv("DOWNLOAD_URL_" + product.replace("-", "_"), "").strip()
         if not url:
@@ -845,6 +888,7 @@ class Shop:
         rec = self.licenses.find_by_key(key)
         if rec["status"] != "active":
             raise LicenseError("revoked", 403, "Licence is not active")
+        self.licenses.check_trial_usable(rec)
         return self.download_link(rec["lid"], rec["product"])
 
     # ------------------------------------------------------------------ "lost my key / link" (website form)
@@ -861,7 +905,7 @@ class Shop:
             return {"ok": True}
         items = []
         for rec in self.licenses.by_email(email):
-            if rec.get("status") != "active":
+            if rec.get("status") != "active" or self.licenses.trial_expired(rec):
                 continue
             items.append((rec["product"], self.licenses.recover_key(rec), self.download_link(rec["lid"], rec["product"])))
         if items or os.getenv("RESEND_REPLY_WHEN_UNKNOWN", "1") == "1":

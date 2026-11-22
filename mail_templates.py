@@ -222,6 +222,93 @@ def refund(product, lang, order_id, key_hint, test):
     return t["subj_refund"].format(name=pname), "\n".join(text).rstrip(), _wrap(lang, inner)
 
 
+TRIAL_T = {
+    "hu": {
+        "subj_confirm": "Erősítsd meg a 48 órás ingyenes próbát – E-Bike Doctor PRO",
+        "confirm_intro": "Ingyenes, 48 órás próbát kértél ehhez a termékhez: {name}. A próba indításához kattints az alábbi gombra (a link 24 óráig érvényes).",
+        "confirm_btn": "Próba indítása",
+        "confirm_what": "Bankkártya nem kell, és a próba után semmit nem terhelünk. E-mail-címenként egy próba vehető igénybe.",
+        "subj_key": "{name} – 48 órás próbakulcs és letöltés",
+        "key_intro": "Elkészült a 48 órás próbalicenced. A 48 óra az alkalmazásban történő első aktiválással indul.",
+        "key": "Próbakulcs",
+        "steps_title": "Indítás",
+        "after": "A próba lejárta után az alkalmazás ingyenes módban fut tovább, az adataid megmaradnak. A teljes PRO licenc itt vásárolható meg: {url}",
+        "rules": "Egy próba eszközönként és e-mail-címenként egyszer használható, és nem helyezhető át másik eszközre.",
+        "subj_used": "E-Bike Doctor PRO – az ingyenes próbát már igénybe vetted",
+        "used": "Ehhez az e-mail-címhez már tartozik ingyenes próba, ezért újat nem tudunk kiadni. A teljes PRO licencet itt vásárolhatod meg: {url}",
+    },
+    "de": {
+        "subj_confirm": "Bitte bestätige deinen kostenlosen 48-Stunden-Test – E-Bike Doctor PRO",
+        "confirm_intro": "Du hast einen kostenlosen 48-Stunden-Test für {name} angefordert. Klicke auf die Schaltfläche, um den Test zu starten (der Link ist 24 Stunden gültig).",
+        "confirm_btn": "Test starten",
+        "confirm_what": "Keine Kreditkarte nötig, nach dem Test wird nichts berechnet. Ein Test pro E-Mail-Adresse.",
+        "subj_key": "{name} – 48-Stunden-Testschlüssel und Download",
+        "key_intro": "Deine 48-Stunden-Testlizenz ist fertig. Die 48 Stunden beginnen mit der ersten Aktivierung in der App.",
+        "key": "Testschlüssel",
+        "steps_title": "Start",
+        "after": "Nach dem Test läuft die App im kostenlosen Modus weiter, deine Daten bleiben erhalten. Die volle PRO-Lizenz gibt es hier: {url}",
+        "rules": "Ein Test pro Gerät und E-Mail-Adresse; er kann nicht auf ein anderes Gerät übertragen werden.",
+        "subj_used": "E-Bike Doctor PRO – kostenloser Test bereits genutzt",
+        "used": "Für diese E-Mail-Adresse wurde der kostenlose Test bereits genutzt, daher können wir keinen neuen ausstellen. Die volle PRO-Lizenz gibt es hier: {url}",
+    },
+    "en": {
+        "subj_confirm": "Confirm your free 48-hour trial – E-Bike Doctor PRO",
+        "confirm_intro": "You requested a free 48-hour trial of {name}. Click the button below to start the trial (the link is valid for 24 hours).",
+        "confirm_btn": "Start the trial",
+        "confirm_what": "No credit card needed and nothing is charged after the trial. One trial per e-mail address.",
+        "subj_key": "{name} – 48-hour trial key and download",
+        "key_intro": "Your 48-hour trial licence is ready. The 48 hours start with the first activation in the app.",
+        "key": "Trial key",
+        "steps_title": "Getting started",
+        "after": "When the trial ends the app keeps running in its free mode and your data stays. The full PRO licence is available here: {url}",
+        "rules": "One trial per device and e-mail address; it cannot be moved to another device.",
+        "subj_used": "E-Bike Doctor PRO – free trial already used",
+        "used": "A free trial has already been used with this e-mail address, so we cannot issue another one. The full PRO licence is available here: {url}",
+    },
+}
+
+
+def trial_confirm(product, lang, confirm_url):
+    lang = lang_of(lang)
+    t, e, pname = TRIAL_T[lang], _h.escape, NAMES[product][lang]
+    intro = t["confirm_intro"].format(name=pname)
+    text = "\n".join([intro, confirm_url, "", t["confirm_what"], "", T[lang]["ignore"]] + _footer(T[lang], lang))
+    inner = f'<p>{e(intro)}</p><p><a href="{e(confirm_url)}" style="{CSS_BTN}">{e(t["confirm_btn"])}</a></p>' \
+            f'<p style="font-size:13px;color:#4b5b66">{e(t["confirm_what"])}</p>' \
+            f'<p style="font-size:12px;color:#6b7b86">{e(T[lang]["ignore"])}' + "".join(f"<br>{e(x)}" for x in _footer(T[lang], lang)) + "</p>"
+    return t["subj_confirm"], text, _wrap(lang, inner)
+
+
+def trial_key(product, lang, key, link, test=False):
+    """The trial licence key + installer link (same activation steps as a purchase)."""
+    lang = lang_of(lang)
+    t, b, e, pname = TRIAL_T[lang], T[lang], _h.escape, NAMES[product][lang]
+    steps, shop = b["steps_" + product], site_url(lang, "shop")
+    text = ([b["test"], ""] if test else []) + [pname, "", t["key_intro"], "", f"{t['key']}: {key}", "", f"{b['dl']}:", link, "",
+                                               t["steps_title"] + ":"]
+    text += [f"{i}. {s}" for i, s in enumerate(steps, 1)] + ["", t["rules"], t["after"].format(url=shop)] + _footer(b, lang)
+    inner = (f'<p style="color:#b45309;font-weight:700">{e(b["test"])}</p>' if test else "") + \
+        f'<h2 style="margin:0 0 6px">{e(t["key_intro"])}</h2><p style="margin:0 0 16px;color:#4b5b66">{e(pname)}</p>' \
+        f'<p style="margin:0 0 4px;font-size:13px;color:#4b5b66">{e(t["key"])}</p>' \
+        f'<p style="font-family:Consolas,monospace;font-size:18px;font-weight:700;background:#ecfeff;border:1px solid #a5f3fc;padding:12px;border-radius:8px;' \
+        f'letter-spacing:.5px">{e(key)}</p><p><a href="{e(link)}" style="{CSS_BTN}">{e(b["dl_btn"])}</a></p>' \
+        f'<p style="font-size:13px;color:#4b5b66">{e(b["dl"])}</p><h3 style="margin:18px 0 6px">{e(t["steps_title"])}</h3>' \
+        f'<ol style="padding-left:20px;margin:0">' + "".join(f"<li>{e(s)}</li>" for s in steps) + "</ol>" + \
+        f'<p style="font-size:13px;color:#4b5b66">{e(t["rules"])}</p><p>{e(t["after"].format(url=shop))}</p>' + \
+        f'<p style="font-size:12px;color:#6b7b86">' + "<br>".join(e(x) for x in _footer(b, lang)) + "</p>"
+    return t["subj_key"].format(name=pname), "\n".join(text), _wrap(lang, inner)
+
+
+def trial_used(lang):
+    lang = lang_of(lang)
+    t, e = TRIAL_T[lang], _h.escape
+    msg = t["used"].format(url=site_url(lang, "shop"))
+    text = "\n".join([msg, "", T[lang]["ignore"]] + _footer(T[lang], lang))
+    inner = f'<p>{e(msg)}</p><p><a href="{e(site_url(lang, "shop"))}" style="{CSS_BTN}">E-Bike Doctor PRO</a></p>' \
+            f'<p style="font-size:12px;color:#6b7b86">{e(T[lang]["ignore"])}' + "".join(f"<br>{e(x)}" for x in _footer(T[lang], lang)) + "</p>"
+    return t["subj_used"], text, _wrap(lang, inner)
+
+
 def confirm(lang, confirm_url, unsub_url):
     lang = lang_of(lang)
     t, e = T[lang], _h.escape
