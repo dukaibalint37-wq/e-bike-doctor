@@ -53,6 +53,23 @@ EMAIL_RE = re.compile(r"[^@\s<>\"',;]{1,64}@[A-Za-z0-9.-]{1,180}\.[A-Za-z]{2,24}
 # nothing can be stacked. Without the coupon id the code is "not available" (never silently ignored).
 PROMOS = {"EBIKE-50": {"percent": 50, "coupon_env": "STRIPE_COUPON_EBIKE50"}}
 
+# What the buyer sees on the Stripe page, in the buyer's language (owner, 2026-11-22). Only facts stated on the website:
+# one-time purchase, key + download link by e-mail right after payment, one active device per licence, 14-day voluntary refund.
+CHECKOUT_NAMES = {"EBD-AND": {"hu": "E-Bike Doctor PRO – Android PRO licenc", "de": "E-Bike Doctor PRO – Android-PRO-Lizenz",
+                              "en": "E-Bike Doctor PRO – Android PRO licence"},
+                  "EBD-WIN": {"hu": "E-Bike Doctor PRO – Windows PRO licenc", "de": "E-Bike Doctor PRO – Windows-PRO-Lizenz",
+                              "en": "E-Bike Doctor PRO – Windows PRO licence"}}
+CHECKOUT_DESC = {"EBD-AND": {"hu": "E-bike diagnosztikai alkalmazás Androidra. Egyszeri vásárlás, nem előfizetés. A licenckulcsot és a letöltési linket fizetés után azonnal e-mailben küldjük; egy licenc egyszerre egy készüléken aktív.",
+                             "de": "E-Bike-Diagnose-App für Android. Einmalkauf, kein Abo. Lizenzschlüssel und Download-Link erhältst du direkt nach der Zahlung per E-Mail; eine Lizenz ist jeweils auf einem Gerät aktiv.",
+                             "en": "E-bike diagnostics app for Android. One-time purchase, no subscription. The licence key and download link are e-mailed right after payment; one licence is active on one device at a time."},
+                 "EBD-WIN": {"hu": "E-bike szervizprogram Windowsra. Egyszeri vásárlás, nem előfizetés. A licenckulcsot és a letöltési linket fizetés után azonnal e-mailben küldjük; egy licenc egyszerre egy számítógépen aktív.",
+                             "de": "E-Bike-Werkstattprogramm für Windows. Einmalkauf, kein Abo. Lizenzschlüssel und Download-Link erhältst du direkt nach der Zahlung per E-Mail; eine Lizenz ist jeweils auf einem Rechner aktiv.",
+                             "en": "E-bike workshop program for Windows. One-time purchase, no subscription. The licence key and download link are e-mailed right after payment; one licence is active on one computer at a time."}}
+CHECKOUT_SUBMIT = {"hu": "A licenckulcsot és a letöltési linket a megadott e-mail-címre küldjük. 14 napon belül indoklás nélkül, e-mailes kérésre visszatérítjük a vételárat. A számlázási adatokra a számla kiállításához van szükség.",
+                   "de": "Lizenzschlüssel und Download-Link senden wir an die angegebene E-Mail-Adresse. Innerhalb von 14 Tagen erstatten wir den Kaufpreis ohne Angabe von Gründen auf Anfrage per E-Mail. Die Rechnungsdaten werden für die Rechnung benötigt.",
+                   "en": "We send the licence key and download link to the e-mail address you enter. Within 14 days we refund the price on request by e-mail, no reason needed. The billing details are needed for the invoice."}
+PRODUCT_IMAGE = "/assets/img/logo-512.png"            # official app logo on the website (512x512)
+
 
 def normalize_promo(code):
     return re.sub(r"\s+", "", str(code or "")).upper()[:40]
@@ -391,8 +408,12 @@ class Shop:
         if price_id:
             item = {"price": price_id, "quantity": 1}
         else:
+            site = (os.getenv("SITE_URL", "").strip() or mail_templates.OFFICIAL_SITE).rstrip("/")
+            pdata = {"name": CHECKOUT_NAMES[prod][lang], "description": CHECKOUT_DESC[prod][lang], "metadata": {"product": prod}}
+            if site.startswith("https://"):
+                pdata["images"] = [site + PRODUCT_IMAGE]
             item = {"price_data": {"currency": PRICES[prod][1].lower(), "unit_amount": price_cents(prod), "tax_behavior": "inclusive",
-                                   "product_data": {"name": mail_templates.NAMES[prod]["en"], "metadata": {"product": prod}}},
+                                   "product_data": pdata},
                     "quantity": 1}
         # manual invoicing (3.3): Stripe asks for the full billing address (name included) and - optionally, for businesses -
         # the tax ID; a Customer object keeps them in the Stripe dashboard as well
@@ -400,7 +421,13 @@ class Shop:
                   "billing_address_collection": "required", "tax_id_collection": {"enabled": True}, "customer_creation": "always",
                   "success_url": self._site_page(self._return_base(origin), lang, "thanks") + "?session_id={CHECKOUT_SESSION_ID}",
                   "cancel_url": self._site_page(self._return_base(origin), lang, "shop") + "?payment=cancelled",   # website shows: no charge
-                  "metadata": meta, "payment_intent_data": {"metadata": meta}}
+                  "metadata": meta, "payment_intent_data": {"metadata": meta},
+                  "custom_text": {"submit": {"message": CHECKOUT_SUBMIT[lang]}}}
+        # optional: only the payment methods that make sense for the buyers, e.g. "card,link" (Apple Pay / Google Pay come with
+        # "card"); empty = the dashboard's dynamic payment methods (unchanged behaviour)
+        pmt = [x.strip() for x in os.getenv("STRIPE_PAYMENT_METHODS", "").split(",") if x.strip()]
+        if pmt:
+            params["payment_method_types"] = pmt
         if quote:
             params["discounts"] = [{"coupon": quote["coupon"]}]     # exactly one discount; Checkout shows it before paying
         if os.getenv("STRIPE_AUTOMATIC_TAX", "0") == "1":       # only after Stripe Tax is set up in the dashboard
