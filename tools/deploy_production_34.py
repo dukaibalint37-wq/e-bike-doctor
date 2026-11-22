@@ -265,6 +265,9 @@ def main():
         svc, base = SERVICES["production"]
         if cmd == "deploy":
             folder = d33.backup("pre-3.4")
+            # the signed manifests (2.0.1 / 3.0.2) and the bucket objects go live with the same deploy (env applies on deploy)
+            put_env(svc, {"DOWNLOAD_OBJECT_EBD_WIN": "windows/EBikeDoctorPRO-Setup-2.0.1.exe",
+                          "DOWNLOAD_OBJECT_EBD_AND": "android/EBikeDoctorPRO-3.0.2-web.apk"})
             d33.git("fetch", "-q", "origin")
             main_sha, target = d33.git("rev-parse", "origin/main"), d33.git("rev-parse", "origin/feature/trial-promo")
             if os.system(f'git -C "{REPO}" merge-base --is-ancestor {main_sha} {target}') != 0:
