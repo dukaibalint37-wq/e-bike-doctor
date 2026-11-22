@@ -30,16 +30,10 @@ class CheckoutTrustTest(StripeBase):
         self.shop.stripe_checkout("windows", "hu", True)
         self.assertEqual(self.body()["line_items[0][price_data][product_data][name]"], "E-Bike Doctor PRO – Windows PRO licenc")
 
-    def test_payment_methods_only_when_configured(self):
+    def test_payment_methods_are_left_to_the_dashboard(self):
+        # Stripe answers 400 to payment_method_types on Checkout Sessions (verified 2026-11-22): never send it
         self.shop.stripe_checkout("android", "hu", True)
-        self.assertNotIn("payment_method_types[0]", self.body())                       # default: dashboard (dynamic)
-        os.environ["STRIPE_PAYMENT_METHODS"] = "card, link"
-        try:
-            self.shop.stripe_checkout("android", "hu", True)
-            q = self.body()
-            self.assertEqual((q["payment_method_types[0]"], q["payment_method_types[1]"]), ("card", "link"))
-        finally:
-            os.environ.pop("STRIPE_PAYMENT_METHODS")
+        self.assertFalse([k for k in self.body() if k.startswith("payment_method_types")])
 
     def test_every_product_and_language_has_texts(self):
         for prod in S.PRICES:

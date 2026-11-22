@@ -423,11 +423,8 @@ class Shop:
                   "cancel_url": self._site_page(self._return_base(origin), lang, "shop") + "?payment=cancelled",   # website shows: no charge
                   "metadata": meta, "payment_intent_data": {"metadata": meta},
                   "custom_text": {"submit": {"message": CHECKOUT_SUBMIT[lang]}}}
-        # optional: only the payment methods that make sense for the buyers, e.g. "card,link" (Apple Pay / Google Pay come with
-        # "card"); empty = the dashboard's dynamic payment methods (unchanged behaviour)
-        pmt = [x.strip() for x in os.getenv("STRIPE_PAYMENT_METHODS", "").split(",") if x.strip()]
-        if pmt:
-            params["payment_method_types"] = pmt
+        # payment methods: Stripe no longer accepts payment_method_types for Checkout (400) - they are managed only in the
+        # Dashboard (Settings -> Payment methods)
         if quote:
             params["discounts"] = [{"coupon": quote["coupon"]}]     # exactly one discount; Checkout shows it before paying
         if os.getenv("STRIPE_AUTOMATIC_TAX", "0") == "1":       # only after Stripe Tax is set up in the dashboard
