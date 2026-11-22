@@ -43,7 +43,9 @@ def stats_env():
 
 
 def password():
-    return open(os.path.join(STATS_DIR, "stats-password.txt"), encoding="utf-8").read().strip()
+    """Read from STATS_PASSWORD_FILE (the owner may keep the file elsewhere) - never printed."""
+    path = os.environ.get("STATS_PASSWORD_FILE", "").strip() or os.path.join(STATS_DIR, "stats-password.txt")
+    return open(path, encoding="utf-8").read().strip()
 
 
 class Check:
