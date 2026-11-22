@@ -210,6 +210,41 @@ class BackfillTest(TrialBase):
         self.assertEqual(m["activations"]["first"]["EBD-AND"], 1)
 
 
+class BackfillNoDuplicateTest(TrialBase):
+    def _setup_history(self):
+        self.stripe.sessions["cs_test_h"] = session("cs_test_h", product="EBD-WIN")
+        self.deliver({"id": "cs_test_h"})
+        key = self.issue("hist@example.com", "android")
+        self.lic.activate(key, "EBD-AND", DEV_A)
+        self.clock.t += H
+        st = ST.Stats(self.store, clock=self.clock); st.start()
+        return st
+
+    def counts(self, st):
+        d = ST.local_date(self.clock())
+        m = st.report(d, d, include_test=True)["periods"]["all"]["metrics"]
+        return (m["sales"]["count"]["EBD-WIN"], m["trials"]["issued"]["EBD-AND"], m["activations"]["first"]["EBD-AND"])
+
+    def test_interrupted_and_repeated_backfill_never_double_counts(self):
+        st = self._setup_history()
+        st.backfill(self.lic, self.shop)
+        once = self.counts(st)
+        self.assertEqual(once, (1, 1, 1))
+        # simulate a crash before the "done" marker + lock expiry: the whole backfill runs again
+        self.store.set("st:bf:v1", None, 1); self.store.set("st:bf:lock", 0, 1)
+        st._cache.clear()
+        st.backfill(self.lic, self.shop, force=True)
+        st._cache.clear(); st._report_cache.clear()
+        self.assertEqual(self.counts(st), once)
+
+    def test_parallel_backfill_is_locked(self):
+        st = self._setup_history()
+        self.store.incr("st:bf:lock", 900)                    # another process holds the lock
+        with self.assertRaises(L.LicenseError) as cm:
+            st.backfill(self.lic, self.shop)
+        self.assertEqual(cm.exception.code, "busy")
+
+
 class StatsAuthTest(unittest.TestCase):
     def setUp(self):
         os.environ.update({"STATS_PASSWORD_HASH": A.hash_password("titkos-jelszo", iterations=1000), "STATS_SESSION_SECRET": "s"})

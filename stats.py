@@ -178,7 +178,17 @@ class Stats:
             with self._lock:
                 for d, lst in zip(need, lists):
                     self._cache[d] = lst if isinstance(lst, list) else []
-        return [e for d in days for e in self._cache.get(d, []) if isinstance(e, dict) and "t" in e]
+        out, seen = [], set()
+        for d in days:
+            for e in self._cache.get(d, []):
+                if not isinstance(e, dict) or "t" not in e:
+                    continue
+                if e.get("id"):
+                    if e["id"] in seen:
+                        continue
+                    seen.add(e["id"])
+                out.append(e)
+        return out
 
     def events(self, t_from, t_to):
         days, t = [], t_from - DAY
@@ -195,6 +205,8 @@ class Stats:
             start = self.start()
             if not start:
                 raise LicenseError("store_unavailable", 503, "Statistics store unavailable")
+            if self.store.incr("st:bf:lock", 900) != 1:      # another process is backfilling right now (cross-process lock)
+                raise LicenseError("busy", 503, "Statistics are being prepared - try again in a minute")
             evs = []
             recs = licenses.all(limit=100_000)
             orders = shop.orders()
@@ -250,6 +262,8 @@ class Stats:
                             evs.append({"t": t_mid, "k": kind, "p": p, "m": m, "n": n, **({"ok": 1} if kind == "dl" else {})})
             for e in evs:
                 e["bf"] = 1
+                # deterministic id: an interrupted and repeated backfill can never count an item twice (deduplicated on read)
+                e["id"] = "bf" + hashlib.sha1(json.dumps(e, sort_keys=True).encode()).hexdigest()[:16]
                 self.store.push("st:ev:" + _utc_day(e["t"]), e, KEEP)
             first = min([_utc_day(e["t"]) for e in evs] + [self.store.get("st:first_day") or sday])
             self.store.set("st:first_day", first, KEEP)
