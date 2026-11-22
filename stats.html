@@ -21,10 +21,12 @@ button,.btn{background:var(--panel2);color:var(--ink);border:1px solid var(--lin
 button.primary{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:600}
 button.on{background:var(--blue);border-color:var(--blue)}
 button:disabled{opacity:.55;cursor:default}
+select{max-width:100%}
 input[type=date],input[type=password],select{background:#091228;color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:8px 10px;font:inherit;font-size:14px;color-scheme:dark}
 label.ck{display:inline-flex;gap:6px;align-items:center;color:var(--muted);font-size:14px}
 .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,460px),1fr));gap:14px}
+.grid>*{min-width:0}
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
 .kpi{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
 .kpi .v{font-size:24px;font-weight:700;letter-spacing:-.01em}
@@ -103,7 +105,7 @@ dl.def dt{font-weight:600;margin-top:8px}dl.def dd{margin:2px 0 0;color:var(--mu
           <option value="trial">Próbaverziók (igénylés / kiadás / aktiválás)</option>
           <option value="sales">Sikeres vásárlások</option>
           <option value="rev">Bevétel (USD)</option>
-          <option value="funnel">Vásárlási tölcsér (Stripe: oldal / sikeres / sikertelen / félbehagyott)</option>
+          <option value="funnel">Vásárlási tölcsér (Stripe)</option>
         </select>
       </div>
       <div class="legend" id="legend"></div>
