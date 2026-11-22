@@ -170,7 +170,8 @@ dl.def dt{font-weight:600;margin-top:8px}dl.def dd{margin:2px 0 0;color:var(--mu
     fetch("/v1/stats/login",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:$("pw").value})})
       .then(function(r){ return r.json().catch(function(){return {}}).then(function(j){
         if(r.ok){ $("pw").value=""; showApp(); load(); startTimer(); return }
-        $("loginMsg").innerHTML = '<span class="bad">' + (r.status===429 ? "Túl sok sikertelen próbálkozás – várj 15 percet." :
+        $("loginMsg").innerHTML = '<span class="bad">' + (r.status===429 && j.reason==="burst" ? "Túl sok kérés erről a hálózatról – próbáld újra néhány perc múlva." :
+          r.status===429 ? "Túl sok sikertelen próbálkozás – várj 15 percet." :
           r.status===503 ? "A belépés még nincs beállítva a szerveren." : "Hibás jelszó.") + "</span>";
       })}).catch(function(){ $("loginMsg").innerHTML='<span class="bad">A szerver nem érhető el (ébredés alatt lehet) – próbáld újra.</span>' })
       .then(function(){ $("loginBtn").disabled = false });

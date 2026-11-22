@@ -3,6 +3,7 @@ Secrets are read from the Render API / local key files and NEVER printed.
 
   python tools/deploy_production_35.py staging --confirm       STATS_* env on staging, push the staging branch, wait, e2e
   python tools/deploy_production_35.py check staging|production
+  python tools/deploy_production_35.py e2e staging                trial + promo end-to-end test (3.4) against 3.5.0
   python tools/deploy_production_35.py deploy --confirm        production: backup -> rollback tag -> STATS_* env -> fast-forward
                                                                main -> wait live -> regression -> statistics check
   python tools/deploy_production_35.py rollback --confirm      main back to the tag (code only; the STATS_* variables stay, unused)
@@ -98,12 +99,30 @@ class Check:
                                                             sum(allm.get("downloads", {}).get("legacy_started", {}).values()),
                                                             "sales": allm.get("sales", {}).get("count"), "revenue": allm.get("sales", {}).get("revenue"),
                                                             "trials": allm.get("trials", {}).get("issued"), "activations": allm.get("activations", {}).get("first")}))
-        # end-to-end recording with an OWNER licence (hidden from the customer figures by default)
-        owners = json.load(open(OWNERS))
-        prod, o = next(iter(owners.items()))
-        before = d0["periods"]["today"]["metrics"]["downloads"]["started"][prod]
+        # end-to-end recording with a licence that is hidden from the customer figures by default:
+        # production = an OWNER licence, staging = a TEST-mode trial issued through the real trial flow
+        if self.name == "production":
+            owners = json.load(open(OWNERS))
+            prod, o = next(iter(owners.items()))
+            key = o["license_key"]
+        else:
+            prod = "EBD-AND"
+            t0 = d0["periods"]["today"]["metrics"]["trials"]
+            email = d34.OWNER_MAIL.replace("@", "+ebdstats" + time.strftime("%m%d%H%M%S") + "@")
+            s, _, _ = self.http("POST", "/v1/trial/request", {"email": email, "product": "android", "lang": "hu", "code": "EBIKE-TRIAL2", "consent": True}, cookie=False)
+            from licensing import email_hash
+            s2, _, b = self.http("POST", "/v1/trial/confirm?t=" + d34.E2E("staging").token(email, "EBD-AND"), cookie=False)
+            key = (re.search(r"EBDA-[0-9A-Z]{5}-[0-9A-Z]{5}-[0-9A-Z]{5}-[0-9A-Z]{5}", b) or [""])[0]
+            s3, _, _ = self.http("POST", "/v1/license/activate", {"license_key": key, "product": "EBD-AND", "device_id": os.urandom(32).hex(),
+                                                                  "device_name": "stats-check", "app_version": "e2e", "transfer": False}, cookie=False)
+            t1 = self.report(test=1)[1]["periods"]["today"]["metrics"]["trials"]
+            self.ok(s == 200 and s2 == 200 and s3 == 200 and t1["requested"] == t0["requested"] + 1 and
+                    sum(t1["issued"].values()) == sum(t0["issued"].values()) + 1 and sum(t1["activated"].values()) == sum(t0["activated"].values()) + 1,
+                    f"trial request / issue / activation counted ({t0['requested']}->{t1['requested']}, "
+                    f"{sum(t0['issued'].values())}->{sum(t1['issued'].values())}, {sum(t0['activated'].values())}->{sum(t1['activated'].values())})")
+        before = self.report(owner=1, test=1)[1]["periods"]["today"]["metrics"]["downloads"]["started"][prod]
         before_cust = self.report()[1]["periods"]["today"]["metrics"]["downloads"]["started"][prod]
-        s, _, b = self.http("POST", "/v1/shop/download-link", {"license_key": o["license_key"], "product": prod}, cookie=False)
+        s, _, b = self.http("POST", "/v1/shop/download-link", {"license_key": key, "product": prod}, cookie=False)
         url = json.loads(b).get("url", "") if s == 200 else ""
         s2, h2, _ = self.http("GET", url.replace(self.base, ""), cookie=False, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0) EBD-deploy-check"}) if url else (0, {}, "")
         self.ok(s == 200 and s2 == 302 and h2.get("location", "").startswith("https://"), f"owner download link {s} -> file redirect {s2}")
@@ -132,6 +151,9 @@ def main():
     cmd = a[0] if a else ""
     if cmd == "check":
         sys.exit(0 if Check(a[1] if len(a) > 1 else "staging").run() else 1)
+    if cmd == "e2e":                                 # the 3.4 trial + promo end-to-end test against 3.5.0
+        name = a[1] if len(a) > 1 else "staging"
+        sys.exit(0 if d34.E2E(name).run(wait_expiry=(name == "staging")) else 1)
     if "--confirm" not in a:
         raise SystemExit(__doc__)
     git("fetch", "-q", "origin")

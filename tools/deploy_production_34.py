@@ -142,7 +142,7 @@ class E2E:
     def run(self, wait_expiry):
         s, _, b = self.http("GET", "/health")
         h = json.loads(b) if s == 200 else {}
-        self.ok(h.get("version") == "3.4.0", f"[{self.name}] health version {h.get('version')}")
+        self.ok(h.get("version") == d33.VERSION, f"[{self.name}] health version {h.get('version')}")
         stamp = time.strftime("%m%d%H%M%S")
         email = OWNER_MAIL.replace("@", f"+ebdtrial{self.name[:4]}{stamp}@")
         dev_a, dev_b = secrets.token_hex(32), secrets.token_hex(32)
