@@ -37,6 +37,7 @@ import mail_templates as mailer_templates
 import s3presign
 import shop as shop_mod
 import stats as stats_mod
+import funnel as funnel_mod
 import trial as trial_mod
 from store import make_store
 
@@ -54,7 +55,7 @@ LIMITED_PREFIXES = ("/v1/diagnose", "/v1/vision-diagnose", "/v1/chat", "/v1/smar
 ENDPOINTS = ["/health", "/v1/register", "/v1/quota", "/v1/diagnose", "/v1/diagnose/stream", "/v1/smart-diagnose",
              "/v1/smart-diagnose/stream", "/v1/vision-diagnose", "/v1/chat", "/v1/chat/stream", "/v1/metrics", "/v1/report",
              "/v1/license/activate", "/v1/license/refresh", "/v1/license/deactivate", "/v1/shop/stripe/checkout", "/v1/shop/stripe/confirm", "/v1/shop/stripe/webhook", "/v1/shop/lemonsqueezy/webhook", "/v1/shop/download",
-             "/v1/shop/download-link", "/v1/shop/resend", "/v1/shop/promo", "/v1/interest", "/v1/trial/request", "/v1/trial/confirm", "/v1/app/update", "/stats", "/v1/stats/report"]
+             "/v1/shop/download-link", "/v1/shop/resend", "/v1/shop/promo", "/v1/interest", "/v1/trial/request", "/v1/trial/confirm", "/v1/app/update", "/stats", "/v1/stats/report", "/v1/stats/funnel"]
 # Browser access for the website forms only (the apps are not browsers and are unaffected). Empty = no CORS at all.
 CORS_ORIGINS = [o.strip().rstrip("/") for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 if CORS_ORIGINS:
@@ -90,6 +91,7 @@ STATS.start()
 LICENSES.stats_sink = SHOP.stats_sink = TRIAL.stats_sink = STATS
 STATS_AUTH = stats_mod.StatsAuth(LIC_STORE)
 STRIPE_VIEW = stats_mod.StripeView(SHOP.stripe, STORE)
+FUNNEL = funnel_mod.Funnel(SHOP.stripe, STATS, lambda: SHOP.mode)          # 3.6: purchase funnel checked against Stripe
 CACHE = answer_cache.AnswerCache(STORE)
 METRICS = metrics_mod.Metrics()
 
@@ -596,10 +598,26 @@ def stripe_checkout(req: StripeCheckoutRequest, request: Request):
     """Website buy button → hosted Stripe Checkout (one-time payment). Returns {"url"} to redirect the browser to."""
     try:
         r = SHOP.stripe_checkout(req.product, req.lang, req.consent is True, request.headers.get("origin", ""), promo=req.promo)
-        _reconcile_soon()
-        return r
     except licensing_mod.LicenseError as exc:
+        _purchase_start(request, req, ok=False, reason=exc.code)
         raise _lic_error(exc) from None
+    _purchase_start(request, req, ok=True, sid=r.get("id", ""))
+    _reconcile_soon()
+    return r
+
+
+def _purchase_start(request, req, ok, sid="", reason=""):
+    """Funnel event 'bs' (3.6): daily visitor hash (random daily salt, no IP stored), own-test flag, Stripe session id."""
+    try:
+        ua = request.headers.get("user-agent", "")
+        vh, nh = funnel_mod.visitor_hashes(STATS.store, client_ip(request), ua)
+        token = request.headers.get("x-admin-token", "")
+        own = (bool(token) and ADMIN_AUTH.allowed(token, None, "GET", "")) or ua.startswith("EBD-")
+        prod = {"windows": "EBD-WIN", "android": "EBD-AND"}.get(str(req.product).lower(), str(req.product))
+        STATS.record("bs", ok=1 if ok else 0, p=prod, sid=sid, r=reason, vh=vh, nh=nh, own=own, promo=shop_mod.normalize_promo(req.promo),
+                     m=SHOP.mode, web=bool(request.headers.get("origin", "")))
+    except Exception:                                   # noqa: BLE001 - statistics never break a purchase
+        logger.exception("purchase-start statistics failed")
 
 
 def _reconcile_soon(force=False):
@@ -1130,6 +1148,44 @@ def stats_report(from_: str = "", to: str = "", test: int = 0, owner: int = 0, r
     except Exception:                                   # noqa: BLE001
         logger.exception("statistics report failed")
         raise HTTPException(status_code=503, detail="Statistics store unavailable - try again in a minute") from None
+
+
+@app.get("/v1/stats/funnel")
+def stats_funnel(from_: str = "", to: str = "", own: int = 0, request: Request = None, x_admin_token: Optional[str] = Header(default=None)):
+    _stats_ok(request, x_admin_token)
+    if request is not None and not x_admin_token:
+        funnel_mod.mark_owner_network(STATS.store, client_ip(request))   # owner's network today -> own tests apart
+    q = request.query_params if request is not None and hasattr(request, "query_params") else {}
+    d_from, d_to = _stats_range(q.get("from", from_) if q else from_, to)
+    try:
+        return FUNNEL.report(d_from, d_to, include_own=bool(own))
+    except Exception:                                   # noqa: BLE001
+        logger.exception("funnel report failed")
+        raise HTTPException(status_code=503, detail="Funnel data unavailable - try again in a minute") from None
+
+
+class FunnelClassItem(BaseModel):
+    sid: str = Field(min_length=12, max_length=260)
+    cls: Literal["own_review", "external_unverified"]
+
+
+class FunnelClassRequest(BaseModel):
+    items: list[FunnelClassItem] = Field(default_factory=list, max_length=500)
+
+
+@app.post("/v1/admin/funnel/classify")
+def admin_funnel_classify(req: FunnelClassRequest, x_admin_token: Optional[str] = Header(default=None), request: Request = None):
+    """Evidence-based classification of HISTORICAL checkout sessions (before the funnel measured them): own test /
+    probably a real visitor (not provable). Only the statistics read it; Stripe, orders and licences are untouched."""
+    _admin(x_admin_token, request)
+    import re as _re
+    done = 0
+    for it in req.items:
+        if _re.fullmatch(r"cs_(live|test)_[A-Za-z0-9]{10,250}", it.sid):
+            STATS.store.set("st:fn:class:" + it.sid, it.cls, stats_mod.KEEP)
+            done += 1
+    ADMIN_AUTH.audit("funnel_classify", "", f"{done} sessions")
+    return {"classified": done}
 
 
 @app.get("/v1/stats/stripe")

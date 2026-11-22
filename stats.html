@@ -103,11 +103,26 @@ dl.def dt{font-weight:600;margin-top:8px}dl.def dd{margin:2px 0 0;color:var(--mu
           <option value="trial">Próbaverziók (igénylés / kiadás / aktiválás)</option>
           <option value="sales">Sikeres vásárlások</option>
           <option value="rev">Bevétel (USD)</option>
+          <option value="funnel">Vásárlási tölcsér (Stripe: oldal / sikeres / sikertelen / félbehagyott)</option>
         </select>
       </div>
       <div class="legend" id="legend"></div>
       <div class="chart" id="chart"></div>
       <p class="note" id="chartNote"></p>
+    </section>
+
+    <section class="card" id="funnelCard">
+      <h2>Vásárlási tölcsér <span class="pill">Stripe-adatokkal ellenőrizve</span></h2>
+      <div class="row"><label class="ck"><input type="checkbox" id="incOwn"> saját tesztekkel együtt</label></div>
+      <div class="kpis" id="fkpis" style="margin-top:10px"></div>
+      <p class="note" id="fnote"></p>
+      <h3>Időszakonként</h3><div class="tw"><table id="fperiods"></table></div>
+      <div class="grid" style="margin-top:12px">
+        <div><h3>Windows / Android (kiválasztott időszak)</h3><div class="tw"><table id="fproducts"></table></div></div>
+        <div><h3>Bizonyított fizetési hibák oka</h3><div class="tw"><table id="freasons"></table></div>
+             <h3>Elkülönített saját tesztek</h3><div class="tw"><table id="fown"></table></div></div>
+      </div>
+      <h3>Fizetési oldalak a kiválasztott időszakban (legutóbbi 100)</h3><div class="tw"><table id="fsessions"></table></div>
     </section>
 
     <section class="card">
@@ -134,6 +149,8 @@ dl.def dt{font-weight:600;margin-top:8px}dl.def dd{margin:2px 0 0;color:var(--mu
         <dt>Egyedi letöltő / ismételt letöltés</dt><dd>Egyedi = különböző licencek száma, amelyekhez az időszakban letöltés indult. Ismételt = ugyanannak a licencnek a további letöltései. Új letöltő = a licenc élete első letöltése.</dd>
         <dt>Próba igénylés / kiadás / aktiválás</dt><dd>Igénylés = elküldött megerősítő e-mail; kiadás = a megerősítő linkkel létrejött próbalicenc; aktiválás = a 48 óra elindult az alkalmazásban.</dd>
         <dt>Fizetési oldal megnyitva / sikeres vásárlás</dt><dd>A Stripe fizetési oldal megnyílt, illetve a Stripe által igazoltan kifizetett és licenccel teljesített rendelés. A Stripe-panel a Stripe saját adatait mutatja (lejárt = félbehagyott fizetés, díjak, nettó).</dd>
+        <dt>Vásárlási tölcsér</dt><dd>Vásárlást indított = a weboldal vásárlás gombja elküldte a kérést. Stripe fizetési oldal = a Stripe létrehozta a fizetési oldalt, és a böngészőt odairányítottuk. Sikeres = a Stripe szerint kifizetve. Sikertelen fizetés = a Stripe-ban bizonyítottan sikertelen terhelés vagy fizetési hiba van (az okkal együtt). Félbehagyott = a fizetési oldal lejárt, és fizetési kísérlet sem történt. Nyitott = még 24 órán belül, kísérlet nélkül.</dd>
+        <dt>Saját tesztek</dt><dd>Külön számoljuk: a saját eszközeink kérései, a statisztikába aznap belépő hálózat kérései, az API-val lejáratott (teszt) fizetési oldalak, valamint a korábbi időszak utólag vizsgált tesztjei. Ha valódi vásárló ugyanarról a hálózatról vásárol, ahonnan aznap a statisztikába beléptél, saját tesztnek látszhat. A tesztmódú (Stripe teszt) fizetések a staging rendszerben vannak, az éles számokban soha nem szerepelnek.</dd>
         <dt>Visszamenőleges adat</dt><dd>A statisztika indulása előtti időszakra a rendszer meglévő nyilvántartásaiból (licencelőzmények, rendelésnapló, napi számlálók) pótolt adat. Ezekhez egyedi/ismételt bontás és sikertelen kísérlet nem áll rendelkezésre.</dd>
         <dt>Időzóna</dt><dd>Minden nap magyar idő szerint (Europe/Budapest) értendő.</dd>
       </dl>
@@ -195,7 +212,7 @@ dl.def dt{font-weight:600;margin-top:8px}dl.def dd{margin:2px 0 0;color:var(--mu
   $("to").value = iso(new Date()); $("from").value = shift($("to").value, -29);
   if (saved && saved.from && saved.to) { $("from").value = saved.from; $("to").value = saved.to }
   $("apply").addEventListener("click", load);
-  $("incTest").addEventListener("change", load); $("incOwner").addEventListener("change", load);
+  $("incTest").addEventListener("change", load); $("incOwner").addEventListener("change", load); $("incOwn").addEventListener("change", load);
   $("refresh").addEventListener("click", load);
   $("metric").addEventListener("change", drawChart);
   Array.prototype.forEach.call(document.querySelectorAll("[data-g]"), function(b){ b.addEventListener("click", function(){
@@ -219,6 +236,8 @@ dl.def dt{font-weight:600;margin-top:8px}dl.def dd{margin:2px 0 0;color:var(--mu
     }).catch(function(e){ if(e.message!=="auth") $("status").innerHTML='<span class="bad">Hiba: '+esc(e.message)+"</span>" })
       .then(function(){ state.loading=false });
     api("/v1/stats/stripe"+qs()).then(renderStripe).catch(function(e){ if(e.message!=="auth") $("stripeBox").innerHTML='<span class="bad">A Stripe-adatok most nem érhetők el.</span>' });
+    api("/v1/stats/funnel"+qs()+"&own="+($("incOwn").checked?1:0)).then(function(f){ state.funnel=f; renderFunnel(); drawChart() })
+      .catch(function(e){ if(e.message!=="auth") $("fnote").innerHTML='<span class="bad">A tölcsér adatai most nem érhetők el (Stripe).</span>' });
   }
 
   // ---- rendering
@@ -322,8 +341,53 @@ dl.def dt{font-weight:600;margin-top:8px}dl.def dd{margin:2px 0 0;color:var(--mu
     if(s.errors && s.errors.length) h += '<p class="warn">Részben nem elérhető: '+esc(s.errors.join(", "))+" (a Stripe-kulcs jogosultsága)</p>";
     $("stripeBox").innerHTML = '<div class="tw">'+h+'</div><p class="note">Forrás: Stripe API, '+esc(s.from)+" – "+esc(s.to)+" (5 percenként frissül). A Stripe a napokat UTC-ben is számolhatja; a díjak a kifizetés napján jelennek meg.</p>";
   }
+  // ---- purchase funnel (Stripe-checked)
+  var OUTCOME = {paid:'<span class="good">Sikeres</span>', failed:'<span class="bad">Sikertelen fizetés</span>', abandoned:"Félbehagyva (nem próbált fizetni)", open:"Nyitott (még fizethet)"};
+  var OWNWHY = {own_tool:"saját eszköz / szkript", owner_network:"a statisztikába belépő hálózatról", api_expired:"API-val lejáratva (teszt)", review:"utólagos vizsgálat: saját teszt"};
+  function renderFunnel(){
+    var f=state.funnel, P=f.periods, r=P.range.metrics, L=f.reason_labels||{};
+    $("fkpis").innerHTML =
+      kpi("Vásárlást indított", n(sum(r.start_requests)), "egyedi látogató (napi): "+n(r.start_unique_daily)) +
+      kpi("Stripe fizetési oldal", n(sum(r.reached)), "ebből kuponkóddal: "+n(sum(r.coupon_reached))) +
+      kpi("Sikeres vásárlás", n(sum(r.paid)), "kuponnal: "+n(sum(r.coupon_paid))+(Object.keys(r.paid_amount).length?" · "+moneyMap(r.paid_amount):"")) +
+      kpi("Sikertelen fizetés", n(sum(r.failed)), "bizonyított; kísérletek: "+n(r.attempts_failed)) +
+      kpi("Félbehagyott", n(sum(r.abandoned)), "fizetési kísérlet nélkül"+(r.email_entered_abandoned?" · e-mailt megadta: "+n(r.email_entered_abandoned):"")) +
+      kpi("Még nyitott", n(sum(r.open)), "24 órán belül fizethet") +
+      kpi("Saját teszt (külön)", n(r.own.sessions), $("incOwn").checked ? "a fenti számokban is benne" : "a fenti számokban nincs benne");
+    var since = f.measured_since ? new Date(f.measured_since*1000).toLocaleString("hu-HU") : null;
+    $("fnote").innerHTML = "A Stripe-oldal, a sikeres, a sikertelen és a félbehagyott adatok a Stripe tényleges munkameneteiből, terheléseiből és eseményeiből számolódnak. " +
+      "A „vásárlást indított” és az egyedi látogató mérése " + (since ? since + " óta" : "ennek a verziónak a telepítésével indul") + "; korábbra ez nem állapítható meg. " +
+      "Egyedi látogató = naponta egyedi (naponta cserélt, két nap után törölt véletlen sóval képzett jelölő, IP-cím és süti nélkül), több nap összegében ugyanaz a látogató többször is szerepelhet." +
+      (r.external_unverified ? " A korábbi időszakból "+n(r.external_unverified)+" munkamenet valószínűleg valódi látogatótól származik, de ez nem bizonyítható teljesen." : "") +
+      (f.stripe_errors && f.stripe_errors.length ? ' <span class="warn">Részben nem elérhető Stripe-adat: '+esc(f.stripe_errors.join(", "))+"</span>" : "");
+    var cols=[["today","Ma"],["week","Ez a hét"],["month","Ez a hónap"],["year","Ez az év"],["all","Összes"],["range","Kiválasztott"]];
+    var rows=[["Vásárlást indított (kérés)",function(m){return sum(m.start_requests)}],["Egyedi látogató (napi)",function(m){return m.start_unique_daily},1],
+      ["Stripe fizetési oldalra jutott",function(m){return sum(m.reached)}],["Sikeres vásárlás",function(m){return sum(m.paid)}],
+      ["ebből kuponnal",function(m){return sum(m.coupon_paid)},1],["Sikertelen fizetés (bizonyított)",function(m){return sum(m.failed)}],
+      ["Félbehagyott (nem próbált fizetni)",function(m){return sum(m.abandoned)}],["Még nyitott",function(m){return sum(m.open)}],
+      ["Technikai hiba: nem nyílt meg a fizetési oldal",function(m){return m.start_failed},1],["Saját teszt (elkülönítve)",function(m){return m.own.sessions},1]];
+    $("fperiods").innerHTML = '<thead><tr><th>Lépés</th>'+cols.map(function(c){return "<th>"+c[1]+"</th>"}).join("")+"</tr></thead><tbody>"+
+      rows.map(function(x){return "<tr"+(x[2]?' class="sub"':"")+"><td>"+x[0]+"</td>"+cols.map(function(c){return "<td>"+n(x[1](P[c[0]].metrics))+"</td>"}).join("")+"</tr>"}).join("")+"</tbody>";
+    function both(k){ return [n(r[k]["EBD-WIN"]), n(r[k]["EBD-AND"]), n(r[k]["EBD-WIN"]+r[k]["EBD-AND"])] }
+    $("fproducts").innerHTML = table(["","Windows","Android","Összes"],[
+      {c:["Vásárlást indított"].concat(both("start_requests"))},{c:["Stripe-oldal"].concat(both("reached"))},{c:["Sikeres"].concat(both("paid"))},
+      {c:["Kuponkóddal nyitott fizetési oldal"].concat(both("coupon_reached")),cls:"sub"},{c:["Kuponnal fizetett"].concat(both("coupon_paid")),cls:"sub"},{c:["Sikertelen fizetés"].concat(both("failed"))},
+      {c:["Félbehagyott"].concat(both("abandoned"))},{c:["Még nyitott"].concat(both("open"))}]);
+    var rk = Object.keys(r.reasons);
+    $("freasons").innerHTML = rk.length ? table(["Ok (Stripe)","Darab"], rk.map(function(k){return {c:[esc(L[k]||k), n(r.reasons[k])]}})) :
+      '<tbody><tr><td class="muted">Nincs bizonyított fizetési hiba az időszakban (a Stripe-ban nincs sikertelen terhelés).</td></tr></tbody>';
+    var ok2 = Object.keys(r.own.by_reason);
+    $("fown").innerHTML = ok2.length ? table(["Azonosítás","Darab"], ok2.map(function(k){return {c:[esc(OWNWHY[k]||k), n(r.own.by_reason[k])]}})) :
+      '<tbody><tr><td class="muted">'+($("incOwn").checked?"A saját tesztek most a fenti számokban vannak.":"Nincs saját teszt az időszakban.")+"</td></tr></tbody>";
+    $("fsessions").innerHTML = f.sessions.length ? table(["Időpont","Termék","Nyelv","Kód","Eredmény","Megjegyzés"], f.sessions.map(function(s){
+      var note = s.own ? "saját teszt: "+(OWNWHY[s.own]||s.own) : (s.review.indexOf("external")===0 ? "valószínűleg valódi látogató (nem bizonyítható teljesen)" : "");
+      if(s.reasons.length) note = s.reasons.map(function(x){return L[x]||x}).join(", ") + (note?" · "+note:"");
+      return {c:[esc(s.local), PN[s.p]||esc(s.p), esc(s.lang), esc(s.promo||"–"), OUTCOME[s.outcome]||s.outcome, esc(note)], cls: s.own?"sub":""} })) :
+      '<tbody><tr><td class="muted">Nincs fizetési oldal az időszakban.</td></tr></tbody>';
+  }
   // ---- chart (inline SVG, no external library)
   var METRICS = {
+    funnel:{group:[["reached","Stripe-oldal","#2de2ff"],["paid","Sikeres","#4ade80"],["failed","Sikertelen","#ff6b7a"],["abandoned","Félbehagyott","#ffc861"]],src:"funnel"},
     dl:{stack:[["dl_win","Windows","#3a7bff"],["dl_and","Android","#1fe0c8"]]},
     act:{stack:[["act","Első aktiválás","#4ade80"]]},
     opened:{group:[["opened","Link megnyitás","#2de2ff"],["failed","Sikertelen","#ff6b7a"]]},
@@ -332,8 +396,9 @@ dl.def dt{font-weight:600;margin-top:8px}dl.def dd{margin:2px 0 0;color:var(--mu
     rev:{stack:[["rev_usd","Bevétel (USD)","#ffc861"]],money:"USD"}};
   function drawChart(){
     var d=state.data; if(!d) return;
-    var rows = d.series[state.graph].map(function(r){ var o=Object.assign({},r); o.rev_usd=((r.revenue||{}).USD||0)/100; return o });
     var spec = METRICS[$("metric").value], series = spec.stack || spec.group, grouped = !!spec.group;
+    if(spec.src==="funnel" && !state.funnel){ $("chart").innerHTML='<p class="note">A tölcsér adatai betöltés alatt…</p>'; return }
+    var rows = (spec.src==="funnel" ? state.funnel.series : d.series)[state.graph].map(function(r){ var o=Object.assign({},r); o.rev_usd=((r.revenue||{}).USD||0)/100; return o });
     $("legend").innerHTML = series.map(function(s){return '<span><i style="background:'+s[2]+'"></i>'+s[1]+"</span>"}).join("");
     var W = Math.max(600, rows.length * (grouped ? 30 : 22)), H = 260, L = 44, B = 46, T = 12, R = 8;
     var max = 0; rows.forEach(function(r){ var v = grouped ? Math.max.apply(null, series.map(function(s){return r[s[0]]||0})) : series.reduce(function(a,s){return a+(r[s[0]]||0)},0); if(v>max) max=v });
