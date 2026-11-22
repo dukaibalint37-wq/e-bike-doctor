@@ -236,7 +236,7 @@ dl.def dt{font-weight:600;margin-top:8px}dl.def dd{margin:2px 0 0;color:var(--mu
     }).catch(function(e){ if(e.message!=="auth") $("status").innerHTML='<span class="bad">Hiba: '+esc(e.message)+"</span>" })
       .then(function(){ state.loading=false });
     api("/v1/stats/stripe"+qs()).then(renderStripe).catch(function(e){ if(e.message!=="auth") $("stripeBox").innerHTML='<span class="bad">A Stripe-adatok most nem érhetők el.</span>' });
-    api("/v1/stats/funnel"+qs()+"&own="+($("incOwn").checked?1:0)).then(function(f){ state.funnel=f; renderFunnel(); drawChart() })
+    api("/v1/stats/funnel"+qs()+"&own="+($("incOwn").checked?1:0)+(silent===true?"":"&refresh=1")).then(function(f){ state.funnel=f; renderFunnel(); drawChart() })
       .catch(function(e){ if(e.message!=="auth") $("fnote").innerHTML='<span class="bad">A tölcsér adatai most nem érhetők el (Stripe).</span>' });
   }
 

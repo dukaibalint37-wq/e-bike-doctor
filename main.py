@@ -1151,8 +1151,10 @@ def stats_report(from_: str = "", to: str = "", test: int = 0, owner: int = 0, r
 
 
 @app.get("/v1/stats/funnel")
-def stats_funnel(from_: str = "", to: str = "", own: int = 0, request: Request = None, x_admin_token: Optional[str] = Header(default=None)):
+def stats_funnel(from_: str = "", to: str = "", own: int = 0, refresh: int = 0, request: Request = None, x_admin_token: Optional[str] = Header(default=None)):
     _stats_ok(request, x_admin_token)
+    if refresh:
+        FUNNEL._cache.clear()                           # "Frissítés" button: read Stripe again now (otherwise cached 5 minutes)
     if request is not None and not x_admin_token:
         funnel_mod.mark_owner_network(STATS.store, client_ip(request))   # owner's network today -> own tests apart
     q = request.query_params if request is not None and hasattr(request, "query_params") else {}

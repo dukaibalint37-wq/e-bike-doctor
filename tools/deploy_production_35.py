@@ -76,7 +76,7 @@ class Check:
 
     def run(self):
         s, _, b = self.http("GET", "/health")
-        self.ok(s == 200 and json.loads(b).get("version") == "3.5.0", f"[{self.name}] health version {json.loads(b).get('version') if s == 200 else s}")
+        self.ok(s == 200 and json.loads(b).get("version") == d33.VERSION, f"[{self.name}] health version {json.loads(b).get('version') if s == 200 else s}")
         s, h, b = self.http("GET", "/stats")
         self.ok(s == 200 and "Statisztika" in b and "sha256-" in h.get("content-security-policy", "") and "noindex" in h.get("x-robots-tag", ""),
                 f"statistics page served with strict CSP -> {s}")
