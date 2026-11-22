@@ -8,7 +8,7 @@ import os
 
 logger = logging.getLogger("ebike-doctor")
 
-BACKEND_VERSION = "3.4.0"
+BACKEND_VERSION = "3.5.0"
 LANG_NAMES = {"hu": "Hungarian", "en": "English", "de": "German"}
 
 # Compact rules (fewer input tokens on every call) â€“ content unchanged in substance.

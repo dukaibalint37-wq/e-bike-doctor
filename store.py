@@ -57,6 +57,17 @@ class MemoryStore:
     def mget(self, keys):
         return [self.get(k) for k in keys]
 
+    # append-only lists (statistics event log)
+    def push(self, key, value, ttl):
+        with self._lock:
+            lst, exp = self._d.get(key, ([], 0))
+            lst = (lst if isinstance(lst, list) else []) + [value]
+            self._d[key] = (lst, time.time() + ttl)
+            return len(lst)
+
+    def lrange_many(self, keys):
+        return [list(self.get(k) or []) for k in keys]
+
 
 class UpstashStore:
     kind = "upstash"
@@ -102,6 +113,26 @@ class UpstashStore:
                     out.append(res)
         return out
 
+    def push(self, key, value, ttl):
+        """Atomic append (RPUSH): parallel writers never overwrite each other (statistics event log)."""
+        key = self.p + key
+        res = self._pipeline([["RPUSH", key, json.dumps(value, separators=(",", ":"))], ["EXPIRE", key, str(int(ttl))]])
+        return int(res[0])
+
+    def lrange_many(self, keys):
+        """Whole lists in few HTTPS round trips (chunks of 100)."""
+        out = []
+        for i in range(0, len(keys), 100):
+            for res in self._pipeline([["LRANGE", self.p + k, "0", "-1"] for k in keys[i:i + 100]], timeout=15):
+                items = []
+                for x in res or []:
+                    try:
+                        items.append(json.loads(x))
+                    except (ValueError, TypeError):
+                        pass
+                out.append(items)
+        return out
+
 
 class FailSafeStore:
     """Uses the remote store; on any network error falls back to memory so the API keeps working."""
@@ -129,6 +160,12 @@ class FailSafeStore:
 
     def mget(self, keys):
         return self._call("mget", keys)
+
+    def push(self, key, value, ttl):
+        return self._call("push", key, value, ttl)
+
+    def lrange_many(self, keys):
+        return self._call("lrange_many", keys)
 
 
 def mget(store, keys):

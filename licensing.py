@@ -217,6 +217,7 @@ class LicenseService:
     def __init__(self, store, quota_signer, lease_signer=None, clock=time.time):
         self.store, self.quota_signer, self.clock = store, quota_signer, clock
         self.lease = lease_signer if lease_signer is not None else LeaseSigner()
+        self.stats_sink = None                    # stats.Stats (3.5): activation events; never affects the licence logic
 
     # ---- storage helpers
     def _rec_key(self, lid):
@@ -328,6 +329,7 @@ class LicenseService:
                 t["started"], t["expires"] = now, now + int(float(t["hours"]) * 3600)
                 self.store.set(f"trial:dev:{rec['product']}:{device_hash}", rec["lid"], TTL)
                 self._log(rec, "trial_started", dev=device_hash[:8], hours=t["hours"])
+        moved = False
         if dev and dev.get("hash") != device_hash:
             if not transfer:
                 raise LicenseError("device_limit", 409, "This licence is already active on another device")
@@ -335,7 +337,8 @@ class LicenseService:
                 raise LicenseError("transfer_limit", 429, "Too many device changes in the last 30 days")
             rec["transfers"] = [t for t in rec.get("transfers", []) if now - t < 30 * DAY] + [now]
             self._log(rec, "transferred", from_dev=dev.get("hash", "")[:8], to_dev=device_hash[:8])
-            dev = None
+            dev, moved = None, True
+        bound = not dev
         if not dev:
             rec["device"] = {"hash": device_hash, "name": (device_name or "")[:80], "since": now, "last_seen": now, "app": (app_version or "")[:20]}
             rec["activations"] = int(rec.get("activations", 0)) + 1
@@ -343,6 +346,8 @@ class LicenseService:
         else:
             rec["device"].update({"last_seen": now, "app": (app_version or "")[:20] or dev.get("app", "")})
         self._put(rec)
+        if bound and self.stats_sink is not None:
+            self.stats_sink.activation(rec, transfer=moved)       # installed + running app on a new device (never raises)
         return self._lease_for(rec, device_hash)
 
     def refresh(self, key, product, device_hash, app_version=""):

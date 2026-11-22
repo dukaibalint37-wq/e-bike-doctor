@@ -53,6 +53,14 @@ def normalize_code(code):
 class TrialService:
     def __init__(self, store, licenses, shop, mailer, clock=time.time):
         self.store, self.licenses, self.shop, self.mailer, self.clock = store, licenses, shop, mailer, clock
+        self.stats_sink = None                    # stats.Stats (3.5)
+
+    def _ev(self, kind, **fields):
+        if self.stats_sink is not None:
+            try:
+                self.stats_sink.record(kind, **fields)
+            except Exception:                # noqa: BLE001 - statistics never break the trial
+                logger.exception("statistics event failed")
 
     @property
     def enabled(self):
@@ -123,9 +131,12 @@ class TrialService:
             return {"ok": True, "status": "check_email"}           # silently: no mail flood to one address
         self.store.incr("trial:stat:requested", TTL)
         lid = self.store.get("trial:email:" + eh)
+        md = "test" if self.shop.mode == "test" else "live"
         if lid:
             self._mail_existing(lid, email, lang)
+            self._ev("trq", p=prod, m=md, new=False)
             return {"ok": True, "status": "check_email"}
+        self._ev("trq", p=prod, m=md, new=True)
         self.store.set("trial:pending:" + eh, {"email": email, "product": prod, "lang": lang, "created": int(self.clock())}, PENDING_TTL)
         url = f"{self._base()}/v1/trial/confirm?t={self.token(eh, prod)}"
         subject, text, html = mail_templates.trial_confirm(prod, lang, url)
@@ -175,7 +186,8 @@ class TrialService:
             raise
         self.store.set("trial:pending:" + eh, {"status": "done"}, 60)
         self.store.incr("trial:stat:issued", TTL)
-        link = self.shop.download_link(rec["lid"], rec["product"])
+        self._ev("tri", p=rec["product"], lid=rec["lid"], m="test" if rec.get("test") else "live")
+        link =self.shop.download_link(rec["lid"], rec["product"])
         subject, text, html = mail_templates.trial_key(rec["product"], lang, key, link, bool(rec.get("test")))
         self.mailer.send(pend["email"], subject, text, kind="trial-key", html=html)
         logger.info("trial issued %s product=%s", rec["lid"], rec["product"])

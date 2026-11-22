@@ -150,6 +150,15 @@ class Shop:
     def __init__(self, store, licenses, mailer, clock=time.time, stripe=None):
         self.store, self.licenses, self.mailer, self.clock = store, licenses, mailer, clock
         self.stripe = stripe or stripe_pay.StripeClient()
+        self.stats_sink = None                    # stats.Stats (3.5): permanent statistics events
+
+    def _ev(self, kind, **fields):
+        """Statistics event; never raises (a statistics problem must not affect a payment or a download)."""
+        if self.stats_sink is not None:
+            try:
+                self.stats_sink.record(kind, **fields)
+            except Exception:                # noqa: BLE001
+                logger.exception("statistics event failed")
 
     @property
     def mode(self):
@@ -231,6 +240,8 @@ class Shop:
                 self.store.incr(f"shop:revenue_cents:{month}:{money['currency'] or 'EUR'}:{md}", 800 * 86_400, money["total"])
                 if money["tax"]:
                     self.store.incr(f"shop:tax_cents:{month}:{money['currency'] or 'EUR'}:{md}", 800 * 86_400, money["tax"])
+                self._ev("sale", p=prod, lid=lid, m=md, c=money["total"], cur=(money["currency"] or "EUR").upper(), d=money.get("discount") or 0,
+                         promo=(buyer or {}).get("promo", ""), src=source)
             if self.store.get(f"mail:once:purchase:{lid}"):
                 if not any(o.get("lid") == lid for o in self.orders()):   # attempt started but its result was never recorded
                     self._log_order({"t": int(self.clock()), "order": order_id, "product": prod, "mode": md, **money, "lid": lid,
@@ -444,6 +455,7 @@ class Shop:
         self.store.incr(f"shop:checkouts:{day}:{prod}:{self.mode}", 400 * 86_400)
         if quote:
             self.store.incr(f"shop:checkouts_promo:{day}:{quote['code']}:{self.mode}", 400 * 86_400)
+        self._ev("co", p=prod, m=self.mode, promo=quote["code"] if quote else "")
         return {"url": s["url"], "id": s.get("id", "")}
 
     def handle_stripe_webhook(self, raw: bytes, sig_header: str):
@@ -565,7 +577,8 @@ class Shop:
                     pass
             buyer = {"name": (cd.get("name") or "")[:200], "business_name": (cd.get("business_name") or "")[:200],
                      "address": cd.get("address") if isinstance(cd.get("address"), dict) else {},
-                     "tax_ids": cd.get("tax_ids") if isinstance(cd.get("tax_ids"), list) else [], "payment_intent": pi or ""}
+                     "tax_ids": cd.get("tax_ids") if isinstance(cd.get("tax_ids"), list) else [], "payment_intent": pi or "",
+                     "promo": normalize_promo(meta.get("promo")) if disc else ""}
             return self._fulfil(sid, [prod], email, (cd.get("name") or "")[:120], money, not live,
                                 mail_templates.lang_of(meta.get("lang")), "stripe", buyer)
         finally:
@@ -840,6 +853,7 @@ class Shop:
         md = (mine[0].get("mode") if mine else "") or ("test" if test_mode else "live")
         if delta:
             self.store.incr(f"shop:refunded_cents:{month}:{cur}:{md}", 800 * 86_400, delta)
+            self._ev("ref", p=(mine[0].get("product") if mine else ""), m=md, c=delta, cur=cur.upper(), full=attrs.get("status") == "refunded")
         for o in mine:
             o["refunded_cents"] = max(before, refunded)
         if attrs.get("status") == "partial_refund":
@@ -882,6 +896,21 @@ class Shop:
 
     def resolve_download(self, token):
         """Returns the redirect URL for a valid token of an ACTIVE licence; raises otherwise."""
+        return self.resolve_download_rec(token)[0]
+
+    def peek_token(self, token):
+        """(lid, product) of a download token with a VALID signature (expiry not checked), else None - statistics only."""
+        try:
+            body, sig = (token or "").split(".", 1)
+            payload = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)).decode()
+            lid, product, _ = payload.split(".")
+            expected = base64.urlsafe_b64encode(hmac.new(self._secret().encode(), payload.encode(), hashlib.sha256).digest()[:20]).decode().rstrip("=")
+        except (ValueError, UnicodeDecodeError):
+            return None
+        return (lid, product) if self._secret() and hmac.compare_digest(expected, sig) and product in PRODUCTS else None
+
+    def resolve_download_rec(self, token):
+        """(redirect URL, licence record) for a valid token of an ACTIVE licence; raises otherwise."""
         try:
             body, sig = token.split(".", 1)
             payload = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)).decode()
@@ -906,7 +935,7 @@ class Shop:
             raise LicenseError("download_limit", 429, "Too many downloads for this licence today - try again tomorrow")
         self.store.incr(f"shop:downloads:{product}", 800 * 86_400)
         self.store.incr(f"shop:dlday:{day}:{product}:{'test' if rec.get('test') else 'live'}", 400 * 86_400)
-        return url
+        return url, rec
 
     def new_download_link_for_key(self, key):
         rec = self.licenses.find_by_key(key)

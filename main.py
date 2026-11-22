@@ -36,6 +36,7 @@ import mailer as mailer_mod
 import mail_templates as mailer_templates
 import s3presign
 import shop as shop_mod
+import stats as stats_mod
 import trial as trial_mod
 from store import make_store
 
@@ -49,11 +50,11 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
 BURST_LIMIT = int(os.getenv("RATE_LIMIT_PER_10_MINUTES", "30"))
 WINDOW_SECONDS = 600
 LIMITED_PREFIXES = ("/v1/diagnose", "/v1/vision-diagnose", "/v1/chat", "/v1/smart-diagnose", "/v1/register", "/v1/report", "/v1/license", "/v1/shop",
-                    "/v1/interest", "/v1/trial", "/v1/admin/login")
+                    "/v1/interest", "/v1/trial", "/v1/admin/login", "/v1/stats/login")
 ENDPOINTS = ["/health", "/v1/register", "/v1/quota", "/v1/diagnose", "/v1/diagnose/stream", "/v1/smart-diagnose",
              "/v1/smart-diagnose/stream", "/v1/vision-diagnose", "/v1/chat", "/v1/chat/stream", "/v1/metrics", "/v1/report",
              "/v1/license/activate", "/v1/license/refresh", "/v1/license/deactivate", "/v1/shop/stripe/checkout", "/v1/shop/stripe/confirm", "/v1/shop/stripe/webhook", "/v1/shop/lemonsqueezy/webhook", "/v1/shop/download",
-             "/v1/shop/download-link", "/v1/shop/resend", "/v1/shop/promo", "/v1/interest", "/v1/trial/request", "/v1/trial/confirm", "/v1/app/update"]
+             "/v1/shop/download-link", "/v1/shop/resend", "/v1/shop/promo", "/v1/interest", "/v1/trial/request", "/v1/trial/confirm", "/v1/app/update", "/stats", "/v1/stats/report"]
 # Browser access for the website forms only (the apps are not browsers and are unaffected). Empty = no CORS at all.
 CORS_ORIGINS = [o.strip().rstrip("/") for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 if CORS_ORIGINS:
@@ -84,6 +85,11 @@ INTEREST = interest_mod.InterestList(LIC_STORE, MAILER)
 TRIAL = trial_mod.TrialService(LIC_STORE, LICENSES, SHOP, MAILER)
 ADMIN_AUTH = admin_auth.AdminAuth(LIC_STORE)
 VISITS = analytics.Visits(STORE)
+STATS = stats_mod.Stats(STORE)                  # 3.5: permanent download / trial / sales statistics (always on)
+STATS.start()
+LICENSES.stats_sink = SHOP.stats_sink = TRIAL.stats_sink = STATS
+STATS_AUTH = stats_mod.StatsAuth(LIC_STORE)
+STRIPE_VIEW = stats_mod.StripeView(SHOP.stripe, STORE)
 CACHE = answer_cache.AnswerCache(STORE)
 METRICS = metrics_mod.Metrics()
 
@@ -648,20 +654,38 @@ async def lemonsqueezy_webhook(request: Request):
 
 
 @app.get("/v1/shop/download")
-def shop_download(t: str = ""):
+def shop_download(t: str = "", request: Request = None):
+    ua = request.headers.get("user-agent", "") if request is not None else ""
+    method = getattr(request, "method", "GET") if request is not None else "GET"
     try:
-        url = SHOP.resolve_download(t)
+        url, rec = SHOP.resolve_download_rec(t)
     except licensing_mod.LicenseError as exc:
+        peek = SHOP.peek_token(t)
+        lic = None
+        if peek:
+            try:
+                lic = LICENSES.get(peek[0])
+            except licensing_mod.LicenseError:
+                lic = None
+        STATS.download(False, product=peek[1] if peek else "", lid=peek[0] if peek else "", test=bool(lic and lic.get("test")),
+                       owner=bool(lic and lic.get("owner")), reason=exc.code, user_agent=ua, method=method)
         raise _lic_error(exc) from None
+    STATS.download(True, product=rec["product"], lid=rec["lid"], test=bool(rec.get("test")), owner=bool(rec.get("owner")),
+                   user_agent=ua, method=method)
     return RedirectResponse(url, status_code=302)
 
 
 @app.post("/v1/shop/download-link")
-def shop_download_link(req: LicenseKeyRequest):
+def shop_download_link(req: LicenseKeyRequest, request: Request = None):
     try:
-        return {"url": SHOP.new_download_link_for_key(req.license_key)}
+        rec = LICENSES.find_by_key(req.license_key)
+        url = SHOP.new_download_link_for_key(req.license_key)
     except licensing_mod.LicenseError as exc:
         raise _lic_error(exc) from None
+    origin = request.headers.get("origin", "") if request is not None else ""
+    STATS.record("link", p=rec["product"], lid=rec["lid"], m="test" if rec.get("test") else "live", o=bool(rec.get("owner")),
+                 src="web" if origin else "app")
+    return {"url": url}
 
 
 class ResendRequest(BaseModel):
@@ -1021,6 +1045,99 @@ def admin_purge_test(req: PurgeRequest, x_admin_token: Optional[str] = Header(de
     r = SHOP.purge_test_data()
     ADMIN_AUTH.audit("purge_test_data", "", f"{len(r['purged_licences'])} licences")
     return r
+
+
+# ============================================================================= 3.5: permanent statistics page (password login)
+def _stats_ok(request, x_admin_token=None):
+    """Statistics session (password) OR the 2FA admin session / admin header token. Unknown -> 404."""
+    cookies = request.cookies if request is not None and hasattr(request, "cookies") else {}
+    if cookies.get(stats_mod.COOKIE) and STATS_AUTH.valid(cookies.get(stats_mod.COOKIE)):
+        return True
+    if ADMIN_AUTH.allowed(x_admin_token, cookies.get(admin_auth.COOKIE), "GET", ""):
+        return True
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
+def _stats_cookie(value, max_age):
+    return f"{stats_mod.COOKIE}={value}; Path=/; Max-Age={max_age}; HttpOnly; Secure; SameSite=Strict"
+
+
+@app.get("/stats")
+def stats_page():
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "stats.html"), encoding="utf-8") as f:
+        page = f.read()
+    import hashlib as _hl
+    import re as _re
+    hashes = " ".join("'sha256-" + base64.b64encode(_hl.sha256(s.encode()).digest()).decode() + "'"
+                      for s in _re.findall(r"<script>(.*?)</script>", page, _re.S))
+    return HTMLResponse(page, headers={
+        "Content-Security-Policy": f"default-src 'none'; script-src {hashes}; style-src 'unsafe-inline'; img-src 'self' data:; "
+                                   "connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+        "X-Robots-Tag": "noindex, nofollow"})
+
+
+class StatsLoginRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=200)
+
+
+@app.post("/v1/stats/login")
+def stats_login(req: StatsLoginRequest, request: Request):
+    try:
+        cookie, exp = STATS_AUTH.login(req.password, quota_mod.ip_hash(client_ip(request)))
+    except licensing_mod.LicenseError as exc:
+        raise _lic_error(exc) from None
+    ADMIN_AUTH.audit("stats_login", quota_mod.ip_hash(client_ip(request)))
+    return JSONResponse({"ok": True, "expires": exp}, headers={"Set-Cookie": _stats_cookie(cookie, exp - int(time.time()))})
+
+
+@app.post("/v1/stats/logout")
+def stats_logout(request: Request):
+    cookies = request.cookies if hasattr(request, "cookies") else {}
+    STATS_AUTH.logout(cookies.get(stats_mod.COOKIE))
+    return JSONResponse({"ok": True}, headers={"Set-Cookie": _stats_cookie("", 0)})
+
+
+@app.get("/v1/stats/session")
+def stats_session(request: Request = None):
+    try:
+        ok = _stats_ok(request)
+    except HTTPException:
+        ok = False
+    return {"configured": STATS_AUTH.configured, "ok": ok}
+
+
+def _stats_range(d_from, d_to):
+    today = stats_mod.local_date(time.time())
+    d_to = d_to if stats_mod.valid_date(d_to) else today
+    d_from = d_from if stats_mod.valid_date(d_from) else stats_mod.add_days(d_to, -29)
+    if d_from > d_to:
+        d_from, d_to = d_to, d_from
+    if d_from < "2024-01-01":
+        d_from = "2024-01-01"
+    return d_from, d_to
+
+
+@app.get("/v1/stats/report")
+def stats_report(from_: str = "", to: str = "", test: int = 0, owner: int = 0, request: Request = None,
+                 x_admin_token: Optional[str] = Header(default=None)):
+    _stats_ok(request, x_admin_token)
+    q = request.query_params if request is not None and hasattr(request, "query_params") else {}
+    d_from, d_to = _stats_range(q.get("from", from_) if q else from_, to)
+    try:
+        if not STATS.store.get("st:bf:v1"):
+            STATS.backfill(LICENSES, SHOP)
+        return STATS.report(d_from, d_to, include_test=bool(test), include_owner=bool(owner))
+    except Exception:                                   # noqa: BLE001
+        logger.exception("statistics report failed")
+        raise HTTPException(status_code=503, detail="Statistics store unavailable - try again in a minute") from None
+
+
+@app.get("/v1/stats/stripe")
+def stats_stripe(from_: str = "", to: str = "", request: Request = None, x_admin_token: Optional[str] = Header(default=None)):
+    _stats_ok(request, x_admin_token)
+    q = request.query_params if request is not None and hasattr(request, "query_params") else {}
+    d_from, d_to = _stats_range(q.get("from", from_) if q else from_, to)
+    return STRIPE_VIEW.range(d_from, d_to, live=SHOP.mode == "live")
 
 
 @app.post("/v1/stats/hit")
