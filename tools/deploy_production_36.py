@@ -52,8 +52,11 @@ class FunnelCheck(d35.Check):
 
     def e2e(self):
         assert self.name == "staging", "real checkouts only on staging (Stripe TEST mode)"
-        f0 = self.endpoint()
-        t0 = f0["periods"]["today"]["metrics"]
+        self.endpoint()
+        # the check opens the statistics page from this network -> its "browser" checkouts are correctly OWN tests
+        # (owner_network); every step is therefore verified in the "with own tests" view, and the default view must not change
+        o0 = self.funnel(own=1)[1]["periods"]["today"]["metrics"]
+        r0 = self.funnel(own=0)[1]["periods"]["today"]["metrics"]
         sk = d34.env_of(self.svc)["STRIPE_SECRET_KEY"]
         assert sk.startswith("sk_test_"), "staging must use a TEST key"
         browser = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) EBD funnel check"
@@ -62,35 +65,34 @@ class FunnelCheck(d35.Check):
             s, _, b = self.http("POST", "/v1/shop/stripe/checkout", {"product": product, "lang": "hu", "consent": True, "promo": promo},
                                 cookie=False, headers={"User-Agent": ua})
             return (re.search(r"(cs_test_[A-Za-z0-9]+)", b) or [None, ""])[1] if s == 200 else ""
-        sid_open = checkout("android", "EBIKE-50", browser)          # a visitor opens the page and leaves it open
+        sid_open = checkout("android", "EBIKE-50", browser)          # page opened and left open (with a code)
         sid_own = checkout("windows", "", "EBD-deploy-3.6")          # our own tool
         sid_exp = checkout("windows", "", browser)                   # later expired by an API call (= test)
         self.ok(all((sid_open, sid_own, sid_exp)), "three staging checkout sessions opened")
-        st, ex = d34.stripe_call(sk, "POST", f"/checkout/sessions/{sid_exp}/expire")
+        st, _ = d34.stripe_call(sk, "POST", f"/checkout/sessions/{sid_exp}/expire")
         self.ok(st == 200, f"one session expired by API -> {st}")
-        paid_ok = failed_ok = False
-        if SCRATCH_CDP and os.path.exists(SCRATCH_CDP):
-            env = dict(os.environ, CDP_UA=browser)
-            py = sys.executable
-            r1 = subprocess.run([py, SCRATCH_CDP, "hu", "", "--pay", "--card=4000000000000002"], capture_output=True, text=True, env=env, timeout=400)
-            failed_ok = "SESSION cs_test_" in r1.stdout or "errors on page" in r1.stdout
-            print("   declined-card run:", "ok" if failed_ok else r1.stdout[-300:])
-            r2 = subprocess.run([py, SCRATCH_CDP, "de", "EBIKE-50", "--pay"], capture_output=True, text=True, env=env, timeout=400)
-            paid_ok = "redirected to the thank-you page: True" in r2.stdout
-            print("   paid-with-coupon run:", "ok" if paid_ok else r2.stdout[-300:])
+        env = dict(os.environ, CDP_UA=browser)
+        r1 = subprocess.run([sys.executable, SCRATCH_CDP, "hu", "", "--pay", "--card=4000000000000002"], capture_output=True, text=True, env=env, timeout=400)
+        print("   declined card (4000 0000 0000 0002):", "redirected (unexpected)" if "thank-you page: True" in r1.stdout else "stayed on the payment page (declined)")
+        r2 = subprocess.run([sys.executable, SCRATCH_CDP, "de", "EBIKE-50", "--pay"], capture_output=True, text=True, env=env, timeout=400)
+        paid_ok = "redirected to the thank-you page: True" in r2.stdout
+        print("   paid with EBIKE-50 (4242):", "ok" if paid_ok else r2.stdout[-300:])
         time.sleep(8)
-        s, f1 = self.funnel()
-        t1 = f1["periods"]["today"]["metrics"]
-        d = lambda k: sum(t1[k].values()) - sum(t0[k].values())
-        self.ok(d("start_requests") == 4 if SCRATCH_CDP else d("start_requests") == 2, f"purchase starts counted (+{d('start_requests')}, own tool excluded)")
-        self.ok(t1["start_unique_daily"] >= t0["start_unique_daily"], f"unique visitors (daily) {t0['start_unique_daily']} -> {t1['start_unique_daily']}")
-        self.ok(t1["own"]["sessions"] - t0["own"]["sessions"] == 2, f"own tests apart: +{t1['own']['sessions'] - t0['own']['sessions']} ({t1['own']['by_reason']})")
-        self.ok(d("open") >= 1, f"open session counted (+{d('open')})")
-        self.ok(sum(t1["coupon_reached"].values()) > sum(t0["coupon_reached"].values()), "coupon page counted")
-        if SCRATCH_CDP:
-            self.ok(failed_ok and d("failed") == 1 and t1["reasons"], f"declined card = PROVEN failure (+{d('failed')}), reason {t1['reasons']}")
-            self.ok(paid_ok and d("paid") == 1 and sum(t1["coupon_paid"].values()) - sum(t0["coupon_paid"].values()) == 1,
-                    f"paid with EBIKE-50 (+{d('paid')}, coupon +{sum(t1['coupon_paid'].values()) - sum(t0['coupon_paid'].values())})")
+        o1 = self.funnel(own=1)[1]["periods"]["today"]["metrics"]
+        f1 = self.funnel(own=0)[1]
+        r1m = f1["periods"]["today"]["metrics"]
+        d = lambda k: sum(o1[k].values()) - sum(o0[k].values())
+        self.ok(d("start_requests") == 5, f"purchase starts counted (+{d('start_requests')} = 3 browser + own tool + declined + paid - API-expired one is a start too)")
+        self.ok(d("reached") == 5, f"Stripe pages reached +{d('reached')}")
+        self.ok(d("failed") == 1 and o1["reasons"], f"declined card = PROVEN failure +{d('failed')}, Stripe reason {o1['reasons']}")
+        self.ok(paid_ok and d("paid") == 1, f"paid +{d('paid')}")
+        self.ok(sum(o1["coupon_paid"].values()) - sum(o0["coupon_paid"].values()) == 1, "coupon purchase +1")
+        self.ok(sum(o1["coupon_reached"].values()) - sum(o0["coupon_reached"].values()) == 2, "coupon pages +2 (open + paid)")
+        self.ok(d("open") == 2 and d("abandoned") == 1, f"open +{d('open')} (left open, own tool), abandoned +{d('abandoned')} (API-expired, before own-test separation)")
+        self.ok(sum(r1m["reached"].values()) == sum(r0["reached"].values()), f"default view unchanged: all of it is own testing ({r1m['own']['by_reason']})")
+        reasons_own = r1m["own"]["by_reason"]
+        self.ok(reasons_own.get("own_tool", 0) >= 1 and reasons_own.get("api_expired", 0) >= 1 and reasons_own.get("owner_network", 0) >= 1,
+                "own tests identified by tool, API expiry and owner network")
         listed = {x["sid"] for x in f1["sessions"]}
         self.ok(sid_open[-8:] in listed, "session list shows the new session")
         return self.summary()
